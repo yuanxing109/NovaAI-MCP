@@ -1,5 +1,7 @@
 # NovaAI-MCP
 
+[![构建与发布](https://github.com/yuanxing109/NovaAI-MCP/actions/workflows/release.yml/badge.svg)](https://github.com/yuanxing109/NovaAI-MCP/actions/workflows/release.yml)
+
 Android Root MCP 服务 - 让 AI 助手直接控制你的设备
 
 ## 简介
@@ -51,6 +53,9 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 1. 从 [Releases](https://github.com/yuanxing109/NovaAI-MCP/releases) 下载 `NovaAI-MCP-v*.zip`
 2. 通过 Magisk/KernelSU/APatch 安装
 3. 重启设备
+
+> 发布包由 CI 自动构建并校验：push 到 `main` 时，若 `module.prop` 的版本还没有
+> 对应 Release，流水线会自动建 tag 并发布（含 `.sha256`）。见 [docs/CI.md](docs/CI.md)。
 
 ## MCP 地址
 
@@ -120,6 +125,21 @@ novaai_shell → command: "id"
 
 > `novaai_shell` 不带 `action`：它是单动作工具。带 `action` 的工具只有
 > 真正按 action 分派行为的那些。
+
+## 开发
+
+构建与发布流水线（触发策略、四个 job、门禁范围）见 [docs/CI.md](docs/CI.md)。
+
+```bash
+bash build.sh all          # Unix / macOS / CI
+```
+
+```powershell
+pwsh -File build.ps1 all   # Windows
+```
+
+回归探针与静态审计脚本清单见
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) 第 9 节。
 
 ## 许可证
 

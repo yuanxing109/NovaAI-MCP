@@ -14,7 +14,8 @@ NovaAI-MCP 模块侧静态审计
     这是刻意的边界，不是漏洞 —— 但它意味着检查器不能自我校验。
   - 不能判断"函数读了一个参数但读完什么也不做"这类语义缺陷
     （novaai_log 的 follow 参数就是这一类，已由 Go 测试覆盖）。
-  - 不检查 zip 产物的权限位 —— 那由 build.ps1 的 Test-Package 负责。
+  - 不检查 zip 产物的权限位 —— 那由 scripts/verify_package.ps1 负责；第 3 项只
+    比对"可执行矩阵与 build.sh 的 chmod 目标是否一致"。
 
 退出码：任一检查失败则为 1。
 #>
@@ -108,20 +109,28 @@ if ((Get-Content -LiteralPath (Join-Path $Root 'common.sh') -Raw) -notmatch 'nov
 }
 Write-Check '2. PID 文件由 daemon 独占写入（G2）' $problems
 
-# ------------------------------------- 3. 可执行集合一致：build.sh ⊇ build.ps1
-# G3 是这一类缺陷的一个实例：build.ps1 断言 bin/*/7zz 必须是 0755，
-# 而 build.sh 漏了 chmod，于是 Linux 检出的包会被 Windows 侧校验器判失败。
-# 这里把 build.ps1 的 Test-Executable 规则抽出来，逐个验证 build.sh 的
-# chmod 目标能覆盖它。
+# ------------------------------------- 3. 可执行集合一致：build.sh ⊇ 可执行矩阵
+# G3 是这一类缺陷的一个实例：矩阵要求 bin/*/7zz 必须是 0755，而 build.sh 漏了
+# chmod，于是 Linux 检出的包会被 Windows 侧校验器判失败。
+# 矩阵的唯一声明点是 scripts/package_contract.ps1（build.ps1 与
+# verify_package.ps1 都点源它）。这里把它抽出来，逐个验证 build.sh 的 chmod
+# 目标能覆盖它。
 $problems = @()
-$ps1 = Get-Content -LiteralPath (Join-Path $Root 'build.ps1') -Raw
-$fnMatch = [regex]::Match($ps1, 'function Test-Executable.*?\n\s*\}', 'Singleline')
-if (-not $fnMatch.Success) {
-    $problems += 'build.ps1 里找不到 Test-Executable 函数 —— 提取失败，检查无法进行'
+$contractPath = Join-Path $Root 'scripts\package_contract.ps1'
+$fnMatch = $null
+if (-not (Test-Path -LiteralPath $contractPath)) {
+    $problems += 'scripts/package_contract.ps1 不存在 —— 可执行矩阵没有唯一声明点'
 } else {
-    $ps1Patterns = @([regex]::Matches($fnMatch.Value, "(?:-like|-eq)\s+'([^']+)'") |
-                     ForEach-Object { $_.Groups[1].Value })
-    if ($ps1Patterns.Count -eq 0) {
+    $contractSrc = Get-Content -LiteralPath $contractPath -Raw
+    $fnMatch = [regex]::Match($contractSrc, 'function Test-Executable.*?\n\s*\}', 'Singleline')
+    if (-not $fnMatch.Success) {
+        $problems += 'package_contract.ps1 里找不到 Test-Executable 函数 —— 提取失败，检查无法进行'
+    }
+}
+if ($null -ne $fnMatch -and $fnMatch.Success) {
+    $rules = @([regex]::Matches($fnMatch.Value, "(?:-like|-eq)\s+'([^']+)'") |
+               ForEach-Object { $_.Groups[1].Value })
+    if ($rules.Count -eq 0) {
         $problems += 'Test-Executable 里没有提取到任何模式 —— 提取失败，检查无法进行'
     }
 
@@ -130,18 +139,18 @@ if (-not $fnMatch.Success) {
         $_.Value.Replace('"', '').Replace("'", '') -replace '^\$STAGE', '' -replace '^/', ''
     } | Where-Object { $_ -ne '' })
 
-    foreach ($p in $ps1Patterns) {
-        $sample = $p -replace 'bin/\*/', 'bin/arm64-v8a/'
+    foreach ($r in $rules) {
+        $sample = $r -replace 'bin/\*/', 'bin/arm64-v8a/'
         $sample = $sample -replace '\*\.', 'service.'
         $sample = $sample -replace '\*', 'x'
         $covered = @($shTargets | Where-Object { $sample -like $_ })
         if ($covered.Count -eq 0) {
-            $problems += ("build.ps1 要求 {0} 可执行（样本 {1}），但 build.sh 没有任何 chmod 目标覆盖它" -f $p, $sample)
+            $problems += ("可执行矩阵要求 {0} 可执行（样本 {1}），但 build.sh 没有任何 chmod 目标覆盖它" -f $r, $sample)
         }
     }
-    Write-Host ("       已比对 {0} 条 build.ps1 规则 / {1} 个 build.sh 目标" -f $ps1Patterns.Count, $shTargets.Count)
+    Write-Host ("       已比对 {0} 条矩阵规则 / {1} 个 build.sh 目标" -f $rules.Count, $shTargets.Count)
 }
-Write-Check '3. build.sh 覆盖 build.ps1 的全部可执行规则（G3/G12）' $problems
+Write-Check '3. build.sh 覆盖可执行矩阵的全部规则（G3/G12）' $problems
 
 # --------------------------------------------------- 4. 版本号唯一来源（G11）
 # 唯一 owner 是 module.prop；构建与展示脚本都必须读它，不得内联字面量。
@@ -231,6 +240,44 @@ foreach ($f in $shellFiles) {
     }
 }
 Write-Check '7. shell 结构配平（if/fi, case/esac, while,for/done）' $problems
+
+# ------------------------------------------- 8. CI 不得成为第三个打包实现
+# 打包的 Unix owner 是 build.sh，Windows owner 是 build.ps1。工作流必须**调用**
+# build.sh，而不是在 YAML 里重新实现编译/打包 —— 那会变成第三份清单，与第 1 节
+# 记录的漂移同类。判据是机械的：出现 go build / zip -r 即视为重新实现。
+# 注意这只覆盖 YAML 自身；`run:` 里调用的脚本（探针会 go build）不在此列。
+$problems = @()
+$wfDir = Join-Path $Root '.github\workflows'
+if (-not (Test-Path -LiteralPath $wfDir)) {
+    $problems += '.github/workflows 不存在 —— 发布流水线没有 owner'
+} else {
+    $wfs = @(Get-ChildItem -LiteralPath $wfDir -File |
+             Where-Object { $_.Extension -in @('.yml', '.yaml') })
+    if ($wfs.Count -eq 0) { $problems += '.github/workflows 下没有工作流文件' }
+
+    $callsBuildSh = $false
+    foreach ($w in $wfs) {
+        # 与第 1 项同一套注释行策略：YAML 的 # 注释不算代码。
+        $body = (@(Get-Content -LiteralPath $w.FullName) |
+                 Where-Object { -not (Test-IsCommentLine $_) }) -join "`n"
+        if ($body -match '\bgo\s+build\b') {
+            $problems += ("{0} 自己调用了 go build —— 编译 owner 是 build.sh" -f $w.Name)
+        }
+        if ($body -match '\bzip\s+-r') {
+            $problems += ("{0} 自己调用了 zip -r —— 打包 owner 是 build.sh" -f $w.Name)
+        }
+        # 只在 name: 里提到 build.sh 不算调用 —— 那会让"删掉构建步骤"逃过检查。
+        foreach ($line in ($body -split "`n")) {
+            if ($line -notmatch 'build\.sh') { continue }
+            if ($line -match '^\s*(-\s*)?name\s*:') { continue }
+            $callsBuildSh = $true
+        }
+    }
+    if (-not $callsBuildSh) {
+        $problems += '没有任何工作流调用 build.sh —— CI 可能重新实现了打包'
+    }
+}
+Write-Check '8. CI 调用 build.sh 而非重新实现打包' $problems
 
 Write-Host ''
 if ($fail -eq 0) {

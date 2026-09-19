@@ -15,6 +15,11 @@ NovaAI-MCP v0.05 构建脚本（Windows / PowerShell）
 staging 清单在两处各有一份。改动其中一处必须同步另一处，
 否则 Windows 包与 Unix 包内容不一致。见 docs/KNOWN_ISSUES.md。
 
+可执行权限矩阵与产物校验**不在本文件里**：
+  scripts/package_contract.ps1  权限矩阵的唯一声明点（本脚本与校验器共用）
+  scripts/verify_package.ps1    产物校验的唯一实现（本脚本与 CI 共用）
+不要把它们复制回来：那正是 docs/KNOWN_ISSUES.md 第 1 节记录的漂移来源。
+
 用法
 ----
   pwsh -File build.ps1            # 全量：编译 + 打包
@@ -43,6 +48,12 @@ $Version = (Select-String -LiteralPath $propPath -Pattern '^version=(.*)$' |
             Select-Object -First 1).Matches[0].Groups[1].Value.Trim()
 if ([string]::IsNullOrEmpty($Version)) { throw "无法从 module.prop 读取 version" }
 $ModuleName = "NovaAI-MCP-v$Version"
+
+# 可执行权限矩阵的唯一声明点。打包（Build-ModuleZip）与校验
+# （Test-Package → scripts/verify_package.ps1）都从这一份读。
+$ContractPath = Join-Path $Root 'scripts\package_contract.ps1'
+if (-not (Test-Path -LiteralPath $ContractPath)) { throw "缺少 $ContractPath" }
+. $ContractPath
 
 $ArchTargets = @(
     @{ Dir = 'arm64-v8a';   GOOS = 'android'; GOARCH = 'arm64'; Extra = @{} },
@@ -212,14 +223,8 @@ function Build-ModuleZip {
         if (-not (Test-Path -LiteralPath $metaSrc)) { throw "缺少 $metaSrc" }
         Copy-Item -LiteralPath (Join-Path $Root 'META-INF') -Destination $stage -Recurse
 
-        # 权限判定：脚本、二进制、wrapper 可执行；其余 0644
-        function Test-Executable([string]$rel) {
-            if ($rel -like 'bin/wrappers/*') { return $true }
-            if ($rel -like 'bin/*/novaaimcpd' -or $rel -like 'bin/*/7zz') { return $true }
-            if ($rel -eq 'META-INF/com/google/android/update-binary') { return $true }
-            if ($rel -notmatch '/' -and $rel -like '*.sh') { return $true }
-            return $false
-        }
+        # 权限判定：矩阵的唯一声明点是 scripts/package_contract.ps1（本文件顶部已点源）。
+        # 不要在这里重新定义 Test-Executable —— 见 docs/KNOWN_ISSUES.md 第 1 节。
 
         New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
         $output = Join-Path $DistDir "$ModuleName.zip"
@@ -275,55 +280,12 @@ function Test-Package {
     if (-not (Test-Path -LiteralPath $output)) { throw "未找到产物: $output" }
 
     Write-Log "校验产物"
-    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($output)
-    $bad = @()
-    try {
-        $execExpected = @()
-        foreach ($e in $zip.Entries) {
-            $rel = $e.FullName
-            $isDir = $rel.EndsWith('/')
-            $mode = ($e.ExternalAttributes -shr 16) -band 0xFFFF
-            if ($isDir) { continue }
-            $wantExec = ($rel -like 'bin/wrappers/*') -or ($rel -like 'bin/*/novaaimcpd') -or
-                        ($rel -like 'bin/*/7zz') -or ($rel -eq 'META-INF/com/google/android/update-binary') -or
-                        ($rel -notmatch '/' -and $rel -like '*.sh')
-            if ($wantExec) { $execExpected += $rel }
-            if ($wantExec -and $mode -ne 0x81ED) { $bad += "$rel 期望 0755，实际 0$('{0:X4}' -f $mode)" }
-            if (-not $wantExec -and $mode -ne 0x81A4) { $bad += "$rel 期望 0644，实际 0$('{0:X4}' -f $mode)" }
-        }
-        $entries = $zip.Entries.Count
-    }
-    finally { $zip.Dispose() }
-
-    $b = [System.IO.File]::ReadAllBytes($output)
-    $eocd = -1
-    for ($i = $b.Length - 22; $i -ge 0; $i--) {
-        if ($b[$i] -eq 0x50 -and $b[$i+1] -eq 0x4b -and $b[$i+2] -eq 0x05 -and $b[$i+3] -eq 0x06) { $eocd = $i; break }
-    }
-    $total = $b[$eocd+10] + ($b[$eocd+11] -shl 8)
-    $p = [int][BitConverter]::ToUInt32($b, $eocd + 16)
-    $hosts = @{}
-    for ($k = 0; $k -lt $total; $k++) {
-        $h = [string]$b[$p+5]
-        $hosts[$h] = 1 + [int]$hosts[$h]
-        $nameLen  = $b[$p+28] + ($b[$p+29] -shl 8)
-        $extraLen = $b[$p+30] + ($b[$p+31] -shl 8)
-        $cmtLen   = $b[$p+32] + ($b[$p+33] -shl 8)
-        $p = $p + 46 + $nameLen + $extraLen + $cmtLen
-    }
-
-    $hostDesc = ($hosts.GetEnumerator() | ForEach-Object { "host=$($_.Key):$($_.Value)" }) -join ' '
-    Write-Log "  条目 $entries 个；可执行文件 $($execExpected.Count) 个；宿主字段 $hostDesc"
-
-    if ($hosts.Keys.Count -ne 1 -or -not $hosts.ContainsKey('3')) {
-        throw "宿主字段未全部标记为 Unix(3)：$hostDesc"
-    }
-    if ($bad.Count -gt 0) {
-        $bad | ForEach-Object { Write-Host "  ✗ $_" }
-        throw "权限位校验失败，共 $($bad.Count) 项"
-    }
-    Write-Log "  权限位与宿主字段校验通过"
+    # 判据的唯一实现在 scripts/verify_package.ps1 —— CI 用同一个脚本校验
+    # build.sh 的产物，所以两个平台的包按同一套规则判定。
+    # 不要把这套判据复制回这里：那正是 docs/KNOWN_ISSUES.md 第 1 节的漂移来源。
+    $verifier = Join-Path $Root 'scripts\verify_package.ps1'
+    if (-not (Test-Path -LiteralPath $verifier)) { throw "缺少 $verifier" }
+    & $verifier -Path $output
 }
 
 switch ($Target) {

@@ -3,7 +3,7 @@
 本文记录**当前状态下确实存在**的限制、待决策项与残余风险。
 与 `security.md`（说明防护模型）互补：那里讲"挡什么"，这里讲"还差什么"。
 
-最后更新：v0.05 之后的清理轮（第三轮：模块生命周期脚本与发布物料）
+最后更新：v0.05 之后的清理轮（第四轮：GitHub 构建与发布流水线）
 
 ---
 
@@ -18,21 +18,36 @@
   central directory 的宿主字段是否为 Unix(3)，任一不符即失败退出。
 - `build.sh` 依赖 Unix 宿主的 `zip` 命令；其权限位由 `zip` 自身从文件系统读取。
 
+**已修（第四轮）**：产物判据原先只存在于 `build.ps1` 的 `Test-Package` 里，
+而 `build.sh` 没有任何产物校验。若 CI 再写一份校验去校验 `build.sh` 的产物，
+就会重新制造本节所述的漂移。现已抽出：
+
+| 文件 | 职责 |
+|------|------|
+| `scripts/package_contract.ps1` | 可执行权限矩阵 —— **唯一声明点** |
+| `scripts/verify_package.ps1` | 产物校验 —— **唯一实现** |
+
+`build.ps1` 点源矩阵，且其 `Test-Package` 委托给 `verify_package.ps1`；
+CI 用**同一个** `verify_package.ps1` 校验 `build.sh` 的产物。
+`scripts/audit_shell.ps1` 第 3 项从 `package_contract.ps1` 提取矩阵，
+再验证 `build.sh` 的 chmod 目标覆盖它。于是"两个平台的包按同一套规则判定"
+成为结构保证，而不是人工同步。
+
+**仍未做**：staging 清单（复制哪些文件进 ZIP）仍是两份，`build.sh` 与
+`build.ps1` 各一份。抽成单一数据文件仍未做；但**权限矩阵与产物校验已收敛**，
+这是原先最容易漂移的部分。
+
 **已修（第三轮）**：`build.ps1` 的 `Test-Executable` 要求 `bin/*/7zz` 必须是
 0755，而 `build.sh` 的 chmod 清单漏了它 —— 于是 Linux 检出上跑 `build.sh`
-产出的包，会被 `build.ps1` 自己的 `Test-Package` 判为失败。本机
+产出的包，会被 Windows 侧校验器判为失败。本机
 `core.fileMode=false`，`git ls-files -s bin/` 显示 `bin/*/7zz` 在索引里是
-`100644`，所以这个漏项在 Windows 上永远看不到。现已补上，并由
-`scripts/audit_shell.ps1` 第 3 项机械比对两份清单（抽出 `Test-Executable`
-的规则，逐个验证 `build.sh` 的 chmod 目标能覆盖它）。
+`100644`，所以这个漏项在 Windows 上永远看不到。现已补上。
+（`Test-Executable` 本身在第四轮迁到了 `scripts/package_contract.ps1`，
+见上。）
 
 > 更正：`META-INF/com/google/android/update-binary` **一直**有单独的 chmod
 > （`build.sh` 第 127 行），不在漏项之列。早先把"漏 2 类 4 个文件"写进判断是
 > 错的，实际只有 `bin/*/7zz` 一类 3 个文件。
-
-**仍未做**：把清单抽成单一数据文件供两个脚本共用；`build.sh` 也**没有**任何
-产物校验（只有 `build.ps1` 有）。所以"两个脚本产出同一个包"仍靠事后比对 +
-人工同步，不是结构保证。
 
 ## 2. 配置字段：本轮清理 21 个无消费者字段
 
@@ -302,7 +317,8 @@ out of range [1:0]`，一个把真正原因藏起来的错误。删除 `route` /
 | `scripts/probe_session.ps1` | 会话四类行为：`session_list` 可编码、限流身份不可伪造、无状态请求不占名额、上限自愈 | 13/13 |
 | `scripts/probe_limits.ps1` | `resultPreviewBytes` 截断语义与 `=0` 不限制 | 8/8 |
 | `scripts/audit_actions.ps1` | 静态契约审计（5 项检查，见第 5 节） | 全 0 |
-| `scripts/audit_shell.ps1` | 模块侧静态审计（7 项检查，见第 10 节） | 全 0 |
+| `scripts/audit_shell.ps1` | 模块侧静态审计（8 项检查，见第 10 节） | 全 0 |
+| `scripts/verify_package.ps1` | 模块 ZIP 产物的权限位与宿主字段（唯一实现，见第 1 节） | 通过 |
 
 另有三组 Go 测试承担脚本覆盖不到的部分：
 
@@ -384,3 +400,32 @@ daemon 完全不写 PID 文件（全仓 `*.pid` 零命中），停止功能完�
   （`scripts/audit_*.ps1` 必须写下这些符号才能检查它们）。这意味着
   **检查器不能自我校验**，且它无法判断"读了参数但什么也不做"这类语义缺陷 ——
   `follow` 就是这一类，只能靠 Go 测试兜。
+- 第 8 项只覆盖 `.github/workflows/*.yml` 自身，且只查 `go build` / `zip -r`
+  两种重新实现形式。工作流 `run:` 里调用的脚本（探针会自己 `go build`）不在
+  此列；构建步骤若被删到只剩 `name:` 提到 `build.sh`，第 8 项会失败。
+
+## 11. 发布流水线（第四轮新增）
+
+`.github/workflows/release.yml`：push 到 `main` 时若 `module.prop` 的版本还没有
+对应 Release，就自动建 tag 并发布；push tag 要求与 `module.prop` 一致；
+PR 只跑门禁不发布。完整说明见 [CI.md](CI.md)。
+
+四个 job：`verify`（ubuntu）· `build`（ubuntu）· `regression`（windows）·
+`release`（ubuntu，唯一有 `contents: write`）。`release` 的 `needs` 是
+`[build, regression]`，所以审计或探针失败时不会发布。
+
+**仍未验证**：
+
+- **`build.sh` 从未在 Linux 上真正执行过。** 开发机是 Windows，此前只有
+  `bash -n` 语法检查与静态比对。CI 的第一次 `build` job 是它第一次真跑；
+  若 Info-ZIP 的宿主字段行为与预期不同，`verify_package.ps1` 会失败并打印实际值。
+- **`bash -n` 不等于模块装得上**：它只证明语法可解析。`customize.sh` /
+  `service.sh` / `uninstall.sh` / `action.sh` 仍无自动化台架（见第 10d 节）。
+- **五个 `scripts/*.ps1` 没有移植到 Linux。** 它们用 `$env:TEMP` 与
+  `Start-Process -WindowStyle`，在 Linux 上的行为未经验证，因此 CI 把它们放在
+  `windows-latest` 上跑（已知全绿：26/26、13/13、8/8、审计全 0）。
+  移植到 Linux 是一件独立工作：需要替换临时目录、去掉 `-WindowStyle`，
+  并在容器里验证三个探针仍全绿。
+- **CI 无法验证真机安装**，也不做签名。
+- `GO_VERSION` 用的是 `stable`（`go.mod` 的 `go 1.22` 是语言下限，不是工具链）。
+  要固定工具链需改工作流。
