@@ -10,8 +10,6 @@
     "listenLoopback": true,
     "_comment_listenLan": "是否监听局域网地址 (0.0.0.0)，开启后需配置 token",
     "listenLan": false,
-    "_comment_legacySse": "是否启用旧版 SSE 支持",
-    "legacySse": true,
     "_comment_allowedOrigins": "允许的 CORS 来源",
     "allowedOrigins": []
   },
@@ -70,16 +68,12 @@
   "security": {
     "_comment_anonymous": "是否允许匿名访问（不推荐）",
     "anonymous": false,
-    "_comment_onLinkOnly": "仅允许本地连接",
-    "onLinkOnly": true,
     "_comment_validateHost": "是否验证 Host 头",
     "validateHost": true,
     "_comment_validateOrigin": "是否验证 Origin 头",
     "validateOrigin": true,
     "_comment_allowCors": "是否允许 CORS",
     "allowCors": false,
-    "_comment_dropFrontendUid": "前端 UID（用于权限降级，2000=shell）",
-    "dropFrontendUid": 2000,
 
     "_comment_token": "Token 认证配置",
     "token": {
@@ -104,9 +98,7 @@
       "_comment_group": "Socket 文件所属组",
       "group": "shell",
       "_comment_sepolicyInject": "是否注入 SELinux 策略",
-      "sepolicyInject": true,
-      "_comment_peerUidRecordOnly": "是否仅记录对端 UID（不用于鉴权）",
-      "peerUidRecordOnly": true
+      "sepolicyInject": true
     },
 
     "_comment_lan": "局域网访问配置",

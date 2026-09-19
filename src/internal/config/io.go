@@ -70,20 +70,6 @@ func Set(c *Config) {
 	current = c
 }
 
-var noHotReloadFields = map[string]bool{
-	"security.unixSocket": true,
-	"security.token":      true,
-	"security.lan":        true,
-	"network.port":        true,
-	"network.listenLan":   true,
-	"paths.stateDir":      true,
-	"paths.workspaceRoot": true,
-}
-
-func IsHotReloadable(field string) bool {
-	return !noHotReloadFields[field]
-}
-
 func Validate(cfg *Config) error {
 	if cfg.SchemaVersion != 3 {
 		return fmt.Errorf("unsupported schemaVersion: %d", cfg.SchemaVersion)

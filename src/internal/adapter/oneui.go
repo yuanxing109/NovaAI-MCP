@@ -25,9 +25,3 @@ func (a *OneUIAdapter) Preprocess(tool, name string, args []string) []string {
 	}
 	return args
 }
-
-func (a *OneUIAdapter) FallbackChain(cmd string, args []string) FallbackChain {
-	return FallbackChain{
-		{Command: cmd, Args: args, Note: "oneui-primary"},
-	}
-}

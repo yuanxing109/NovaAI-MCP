@@ -37,9 +37,3 @@ func (a *AOSPAdapter) Postprocess(tool, name string, stdout []byte) ([]byte, err
 func (a *AOSPAdapter) Verify(ctx context.Context) error {
 	return nil
 }
-
-func (a *AOSPAdapter) FallbackChain(cmd string, args []string) FallbackChain {
-	return FallbackChain{
-		{Command: cmd, Args: args, Note: "aosp-primary"},
-	}
-}

@@ -20,7 +20,6 @@ type Network struct {
 	Port           int      `json:"port"`
 	ListenLoopback bool     `json:"listenLoopback"`
 	ListenLAN      bool     `json:"listenLan"`
-	LegacySSE      bool     `json:"legacySse"`
 	AllowedOrigins []string `json:"allowedOrigins"`
 }
 
@@ -52,15 +51,13 @@ type Limits struct {
 }
 
 type Security struct {
-	Anonymous       bool       `json:"anonymous"`
-	OnLinkOnly      bool       `json:"onLinkOnly"`
-	ValidateHost    bool       `json:"validateHost"`
-	ValidateOrigin  bool       `json:"validateOrigin"`
-	AllowCORS       bool       `json:"allowCors"`
-	DropFrontendUID int        `json:"dropFrontendUid"`
-	Token           TokenConf  `json:"token"`
-	UnixSocket      UnixSocket `json:"unixSocket"`
-	LAN             LANConf    `json:"lan"`
+	Anonymous      bool       `json:"anonymous"`
+	ValidateHost   bool       `json:"validateHost"`
+	ValidateOrigin bool       `json:"validateOrigin"`
+	AllowCORS      bool       `json:"allowCors"`
+	Token          TokenConf  `json:"token"`
+	UnixSocket     UnixSocket `json:"unixSocket"`
+	LAN            LANConf    `json:"lan"`
 }
 
 type TokenConf struct {
@@ -71,12 +68,11 @@ type TokenConf struct {
 }
 
 type UnixSocket struct {
-	Enabled           bool   `json:"enabled"`
-	Path              string `json:"path"`
-	Mode              string `json:"mode"`
-	Group             string `json:"group"`
-	SepolicyInject    bool   `json:"sepolicyInject"`
-	PeerUIDRecordOnly bool   `json:"peerUidRecordOnly"`
+	Enabled        bool   `json:"enabled"`
+	Path           string `json:"path"`
+	Mode           string `json:"mode"`
+	Group          string `json:"group"`
+	SepolicyInject bool   `json:"sepolicyInject"`
 }
 
 type LANConf struct {

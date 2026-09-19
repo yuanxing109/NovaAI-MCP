@@ -16,7 +16,6 @@ func Default() *Config {
 			Port:           5322,
 			ListenLoopback: true,
 			ListenLAN:      false,
-			LegacySSE:      true,
 			AllowedOrigins: []string{},
 		},
 		Paths: Paths{
@@ -45,12 +44,10 @@ func Default() *Config {
 			DownloadRetries:    3,
 		},
 		Security: Security{
-			Anonymous:       false,
-			OnLinkOnly:      true,
-			ValidateHost:    true,
-			ValidateOrigin:  true,
-			AllowCORS:       false,
-			DropFrontendUID: 2000,
+			Anonymous:      false,
+			ValidateHost:   true,
+			ValidateOrigin: true,
+			AllowCORS:      false,
 			Token: TokenConf{
 				Enabled:         true,
 				Value:           token,
@@ -58,61 +55,18 @@ func Default() *Config {
 				AllowQueryParam: false,
 			},
 			UnixSocket: UnixSocket{
-				Enabled:           true,
-				Path:              filepath.Join(stateDir, "mcp.sock"),
-				Mode:              "0660",
-				Group:             "shell",
-				SepolicyInject:    true,
-				PeerUIDRecordOnly: true,
+				Enabled:        true,
+				Path:           filepath.Join(stateDir, "mcp.sock"),
+				Mode:           "0660",
+				Group:          "shell",
+				SepolicyInject: true,
 			},
 			LAN: LANConf{
 				Enabled:     false,
 				AllowedCIDR: []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"},
 			},
 		},
-		Profiles: map[string]Profile{
-			"default": {
-				AllowTools: []string{"*"},
-				// 通用 shell 是万能绕过：只要它可达，pathguard 与 antibrick
-				// 就只是建议。默认把它交给 agent_full。
-				// 另挡"自我管理"类工具：不让模型改服务配置或动 root 模块。
-				DenyTools: []string{
-					"novaai_shell", "novaai_script",
-					"novaai_config", "novaai_root_module", "novaai_systemless",
-				},
-				RiskCeiling: 3,
-			},
-			"readonly": {
-				AllowTools: []string{
-					"novaai_status", "novaai_capabilities", "novaai_health_status",
-					"novaai_root_info",
-					"novaai_device_info", "novaai_fs_info", "novaai_fs_read",
-					"novaai_fs_search", "novaai_fs_hash", "novaai_app_list",
-					"novaai_app_info", "novaai_process", "novaai_log",
-					"novaai_task", "novaai_skill", "novaai_diagnostics",
-					"novaai_session_status", "novaai_session_list",
-					"novaai_audit_status", "novaai_auth_status",
-				},
-				DenyTools:   []string{},
-				RiskCeiling: 0,
-			},
-			"reverse": {
-				AllowTools: []string{
-					"novaai_reverse_*", "novaai_hook_*", "novaai_fs_read", "novaai_fs_info",
-					"novaai_app_info", "novaai_app_list", "novaai_process", "novaai_log",
-					"novaai_device_info", "novaai_status", "novaai_session_*",
-				},
-				DenyTools: []string{
-					"novaai_shell", "novaai_script", "novaai_power", "novaai_root_module",
-				},
-				RiskCeiling: 3,
-			},
-			"agent_full": {
-				AllowTools:  []string{"*"},
-				DenyTools:   []string{},
-				RiskCeiling: 3,
-			},
-		},
+		Profiles: DefaultProfiles(),
 		SessionBinding: SessionBinding{
 			ByTokenHash: map[string]string{},
 			Fallback:    "default",

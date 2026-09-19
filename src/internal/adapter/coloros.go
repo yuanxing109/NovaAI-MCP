@@ -29,9 +29,3 @@ func (a *ColorOSAdapter) Preprocess(tool, name string, args []string) []string {
 	}
 	return args
 }
-
-func (a *ColorOSAdapter) FallbackChain(cmd string, args []string) FallbackChain {
-	return FallbackChain{
-		{Command: cmd, Args: args, Note: "coloros-primary"},
-	}
-}

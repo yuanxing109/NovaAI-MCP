@@ -40,13 +40,6 @@ func (a *MIUIAdapter) Postprocess(tool, name string, stdout []byte) ([]byte, err
 	return stdout, nil
 }
 
-func (a *MIUIAdapter) FallbackChain(cmd string, args []string) FallbackChain {
-	return FallbackChain{
-		{Command: cmd, Args: args, Note: "miui-primary"},
-		{Command: "su", Args: append([]string{"-c", cmd}, args...), Note: "miui-su-fallback"},
-	}
-}
-
 func stripMIUIBanner(b []byte) []byte {
 	lines := bytes.Split(b, []byte("\n"))
 	out := lines[:0]

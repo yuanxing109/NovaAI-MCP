@@ -13,11 +13,3 @@ type Adapter interface {
 	Postprocess(tool, name string, stdout []byte) ([]byte, error)
 	Verify(ctx context.Context) error
 }
-
-type Attempt struct {
-	Command string
-	Args    []string
-	Note    string
-}
-
-type FallbackChain []Attempt

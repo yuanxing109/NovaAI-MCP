@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -82,15 +81,4 @@ func PeerUID(conn net.Conn) (int, error) {
 		return -1, sockErr
 	}
 	return uid, nil
-}
-
-type peerUIDKey struct{}
-
-func WithPeerUID(ctx context.Context, uid int) context.Context {
-	return context.WithValue(ctx, peerUIDKey{}, uid)
-}
-
-func PeerUIDFromContext(ctx context.Context) (int, bool) {
-	v, ok := ctx.Value(peerUIDKey{}).(int)
-	return v, ok
 }

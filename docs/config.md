@@ -42,7 +42,6 @@
 | port | 整数 | 5322 | MCP 服务监听端口 |
 | listenLoopback | 布尔 | true | 是否监听本地回环地址 (127.0.0.1) |
 | listenLan | 布尔 | false | 是否监听局域网地址 (0.0.0.0) |
-| legacySse | 布尔 | true | 是否启用旧版 SSE 支持 |
 | allowedOrigins | 字符串数组 | [] | 允许的 CORS 来源 |
 
 **示例**:
@@ -51,7 +50,6 @@
   "port": 5322,
   "listenLoopback": true,
   "listenLan": false,
-  "legacySse": true,
   "allowedOrigins": []
 }
 ```
@@ -131,21 +129,17 @@
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | anonymous | 布尔 | false | 是否允许匿名访问 |
-| onLinkOnly | 布尔 | true | 仅允许本地连接 |
 | validateHost | 布尔 | true | 是否验证 Host 头 |
 | validateOrigin | 布尔 | true | 是否验证 Origin 头 |
 | allowCors | 布尔 | false | 是否允许 CORS |
-| dropFrontendUid | 整数 | 2000 | 前端 UID（用于权限降级） |
 
 **示例**:
 ```json
 "security": {
   "anonymous": false,
-  "onLinkOnly": true,
   "validateHost": true,
   "validateOrigin": true,
-  "allowCors": false,
-  "dropFrontendUid": 2000
+  "allowCors": false
 }
 ```
 
@@ -181,7 +175,6 @@
 | mode | 字符串 | 0660 | Socket 文件权限 |
 | group | 字符串 | shell | Socket 文件所属组 |
 | sepolicyInject | 布尔 | true | 是否注入 SELinux 策略 |
-| peerUidRecordOnly | 布尔 | true | 是否仅记录对端 UID |
 
 **示例**:
 ```json
@@ -190,8 +183,7 @@
   "path": "/data/adb/novaai-mcp/mcp.sock",
   "mode": "0660",
   "group": "shell",
-  "sepolicyInject": true,
-  "peerUidRecordOnly": true
+  "sepolicyInject": true
 }
 ```
 
@@ -411,7 +403,6 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
     "port": 5322,
     "listenLoopback": true,
     "listenLan": false,
-    "legacySse": true,
     "allowedOrigins": []
   },
   "paths": {
@@ -441,11 +432,9 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   },
   "security": {
     "anonymous": false,
-    "onLinkOnly": true,
     "validateHost": true,
     "validateOrigin": true,
     "allowCors": false,
-    "dropFrontendUid": 2000,
     "token": {
       "enabled": true,
       "value": "your-secret-token",
@@ -457,8 +446,7 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
       "path": "/data/adb/novaai-mcp/mcp.sock",
       "mode": "0660",
       "group": "shell",
-      "sepolicyInject": true,
-      "peerUidRecordOnly": true
+      "sepolicyInject": true
     },
     "lan": {
       "enabled": false,
@@ -468,7 +456,8 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   "profiles": {
     "default": {
       "allowTools": ["*"],
-      "denyTools": ["novaai_config", "novaai_root_module"],
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_config",
+                    "novaai_root_module", "novaai_systemless"],
       "riskCeiling": 3
     },
     "readonly": {

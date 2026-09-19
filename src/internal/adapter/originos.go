@@ -17,9 +17,3 @@ func (a *OriginOSAdapter) Preprocess(tool, name string, args []string) []string 
 	}
 	return args
 }
-
-func (a *OriginOSAdapter) FallbackChain(cmd string, args []string) FallbackChain {
-	return FallbackChain{
-		{Command: cmd, Args: args, Note: "originos-primary"},
-	}
-}
