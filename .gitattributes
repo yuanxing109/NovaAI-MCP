@@ -1,0 +1,9 @@
+# 禁止任何 EOL 转换。
+#
+# 本仓库同时包含：
+#   - 必须在 Android 上以 LF 运行的 shell 脚本（customize.sh / service.sh / ...）
+#   - 交叉编译出的 ELF 二进制与 jar
+#   - Windows 上开发用的 Go 源码
+# 任何自动 EOL 转换都会破坏其中一类。这里统一按字节原样存储，
+# 由 core.autocrlf=false 配合（见 README「开发」一节）。
+* -text

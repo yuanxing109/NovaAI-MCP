@@ -1,0 +1,6 @@
+#!/system/bin/sh
+export PREFIX=/data/data/com.termux/files/usr
+export HOME=/data/data/com.termux/files/home
+export PATH=$PREFIX/bin:$PREFIX/bin/applets
+export LD_LIBRARY_PATH=$PREFIX/lib
+exec $PREFIX/bin/java -jar /data/adb/modules/novaai.mcp/bin/tools/smali.jar "$@"

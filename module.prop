@@ -1,0 +1,6 @@
+id=novaai.mcp
+name=NovaAI Mobile Control Protocol
+version=0.05
+versionCode=5
+author=NovaAI
+description=Android Root MCP 服务：标准化、高安全、可审计、多ROM兼容的AI设备控制层

@@ -1,0 +1,25 @@
+# NovaAI-MCP v0.05 SELinux 规则
+#
+# 为 unix socket 定义自定义类型，允许 shell / su 域连接。
+# 若 sepolicy 注入失败，socket 会 fallback 到 init_socket 上下文，
+# 这是有意的降级策略——只允许 root/shell 域连接，不影响功能。
+
+type novaai_socket, file_type, unix_stream_socket;
+
+# shell 域（uid 2000）
+allow shell novaai_socket:unix_stream_socket { connectto read write };
+
+# su 域（Magisk / KernelSU / APatch）
+allow su novaai_socket:unix_stream_socket { connectto read write };
+
+# 允许 daemon 在其 state 目录下创建 socket
+allow magisk_file novaai_socket:unix_stream_socket { create bind write read };
+allow su_file novaai_socket:unix_stream_socket { create bind write read };
+
+# MCP daemon 需要访问的常见接口（若失败会记录到 diagnostics，不影响启动）
+allow su proc_net:file { read open getattr };
+allow su proc:file { read open getattr };
+allow su sysfs:file { read open getattr };
+allow su tmpfs:file { read write open getattr create unlink };
+allow su app_data_file:dir { search read open };
+allow su system_file:file { read open execute getattr execute_no_trans };

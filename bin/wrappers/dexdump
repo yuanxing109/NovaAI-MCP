@@ -1,0 +1,2 @@
+#!/system/bin/sh
+exec /apex/com.android.art/bin/dexdump "$@"

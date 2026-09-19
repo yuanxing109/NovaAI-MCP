@@ -1,0 +1,12 @@
+# 构建产物：可由源码重建，不入库
+/dist/
+/bin/*/novaaimcpd
+
+# 手工回滚快照。git 接管回滚后不再需要，保留在磁盘但不入库
+/.backup/
+
+# 编辑器 / 系统杂项
+*.swp
+*.tmp
+Thumbs.db
+desktop.ini
