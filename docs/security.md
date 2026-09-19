@@ -138,3 +138,37 @@
 | `INVALID_PARAM` | ID 类参数（`moduleId` / `scheduleId` / 技能 `id`）未通过白名单 |
 | `-32003` | profile 不允许该工具 |
 | `-32009` | 触发限流 |
+
+## 已决策的边界（追认）
+
+以下两处是**刻意**不设守卫，不是遗漏。记录在此，避免后续被当成 bug
+重新"修"一遍。
+
+### `novaai_setting` / `novaai_property` 不做值级黑名单
+
+这两个工具不接受路径参数，`pathguard` 不适用。真正能拦的只有
+`settings put` 的**值**级黑名单（例如禁止改锁屏相关键）。
+
+不做的理由：
+
+- 值空间是开放的，黑名单必然不全，挡不住有动机的攻击者；
+- 误伤面大——`novaai_setting` 的主要用途就是改设置；
+- 这类改动都能从 recovery 或 `settings` 反向恢复，不属于"格机"，
+  而本模块的防护目标是"不格机、不乱改设置到不可恢复"。
+
+风险控制交给 profile：需要严格模式时把 token 绑到 `readonly`。
+
+### `novaai_systemless` / `novaai_hook_*` 豁免 `pathguard`
+
+`/data/adb/modules` 在硬拒绝前缀里，但这两个工具就是该目录的合法管理者
+（`novaai_hook_xposed` 要启停 LSPosed 模块，`novaai_systemless` 要管理
+systemless 覆盖）。它们也过判定的话，工具直接失效。
+
+替代控制有两条：
+
+1. `default` profile 拒绝 `novaai_systemless` 与 `novaai_root_module`；
+2. `moduleId` / 技能 `id` / `scheduleId` 统一过 `idRe` 白名单
+   （`^[A-Za-z0-9_-]+$`），消灭了原先 `../../x` 形式的路径穿越。
+
+代价：绑定到 `agent_full` 的 token 可以改坏模块目录导致卡开机。
+这是 `agent_full` 的定义，不是缺陷。
