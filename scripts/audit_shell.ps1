@@ -181,6 +181,46 @@ foreach ($rule in $literalRules) {
         $problems += ("{0} 里仍有内联版本字面量（匹配 {1}）" -f $rule.File, $rule.Re)
     }
 }
+
+# 预发布（dev）通道：tag 必须是 `v<version>-dev.<序号>` 形式，序号由 git 推导。
+# 这一项存在的原因是**没有别的东西会看着它**：release.yml 不受 audit_shell 第 8 项
+# 管辖（那一项只禁止在 YAML 里重新实现编译与打包），而 dev tag 又是 GitHub 上
+# 不可回收的公开命名空间。改成可移动/可覆盖的语义会造成不可逆的资产错配。
+$wfPath = Join-Path $Root '.github\workflows\release.yml'
+if (-not (Test-Path -LiteralPath $wfPath)) {
+    $problems += '.github/workflows/release.yml 不存在 —— dev 通道没有 owner'
+} else {
+    # 必须剥掉注释行再做判据。初版直接对整份文件用 -match，结果被**本项自己的
+    # 说明注释**（"`--prerelease` 已加：…"）满足，于是把 --prerelease 删掉检查
+    # 依然通过 —— 一条永不失败的检查。这里改用与第 1/8 项相同的注释行策略。
+    # 变异测试（删掉 --prerelease 后应 FAIL）现在会正确报错。
+    $wf = (@(Get-Content -LiteralPath $wfPath) |
+           Where-Object { -not (Test-IsCommentLine $_) }) -join "`n"
+    if ($wf -notmatch '(?m)^\s{2}dev:\s*$') {
+        $problems += 'release.yml 里没有 dev job —— 预发布通道消失'
+    }
+    if ($wf -notmatch 'git rev-list --count HEAD') {
+        $problems += 'dev 通道不再用 git 推导序号 —— 序号来源不明'
+    }
+    # sed 提取已发布的最大序号：没有它，两条分支上同一 commit 会撞同名 tag。
+    if ($wf -notmatch 'sed -n .*dev') {
+        $problems += 'dev 通道不再查询已有的最大序号 —— 同名 tag 会撞车'
+    }
+    if ($wf -notmatch "stable}-dev\.") {
+        $problems += 'dev tag 不再是 `v<version>-dev.<序号>` 形式'
+    }
+    # 预发布必须带 GitHub 的 prerelease 标志：只靠 tag 后缀区分的话，
+    # `gh release list` 与 API 消费方都会把它当成正式版。
+    if ($wf -notmatch '--prerelease') {
+        $problems += 'dev 通道不再标记 --prerelease —— 预发布会被当成正式版'
+    }
+    # 稳定 tag 与 dev tag 之间不允许有别的构造。`--json tagName` 是 gh 的字段名，
+    # 不是版本字面量，所以匹配的必须是**造 tag** 的赋值，而不是碰巧出现 tagName。
+    # （这一项初版写成裸 'tagname'，被自己三行之上那句 --json tagName 当场判失败。）
+    if ($wf -match '(?m)^\s*tag_name\s*=' -or $wf -match '\btagname\s*=') {
+        $problems += 'release.yml 里出现了自造的 tag 格式 —— tag 名只有 module.prop 一个来源'
+    }
+}
 Write-Check '4. 版本号唯一来源为 module.prop（G11）' $problems
 
 # --------------------------------------------------- 5. jar 单一副本（G4）

@@ -2,14 +2,22 @@ name: 构建与发布
 
 # 触发策略
 # --------
-#   push 到 main      → 构建 + 校验；若 module.prop 的版本还没有对应 Release，
-#                       就自动建 tag 并发布（同一版本重复 push 不会重复发布）
-#   push tag v*       → 构建 + 校验 + 发布该 tag，并要求 tag 与 module.prop 一致
+#   push 到 main      → 构建 + 校验，然后走**两条互不影响的发布通道**：
+#                         · 稳定版：module.prop 的版本还没有 Release 时，
+#                           建 tag v<version> 并发布（同一版本重复 push 不重复发布）
+#                         · 预发布：只要 module.prop 的版本**已经**发布过稳定版，
+#                           就自动发 v<version>-dev.<commit 数> 到 prerelease。
+#                           于是每次 push 到 main 都有可下载产物，而稳定版的
+#                           版本号仍然只由人决定。
+#   push tag v*       → 构建 + 校验 + 发布该 tag（含 `-dev.` 的预发布 tag）。
+#                       稳定 tag 必须与 module.prop 一致；预发布 tag 必须在
+#                       同版本稳定版发布之后（严格递增，见 audit_shell.ps1 第 4 项）。
 #   pull_request      → 只跑校验与构建，永不发布
-#   workflow_dispatch → 手动；打开 publish 才发布
+#   workflow_dispatch → 手动；打开 publish 才发布稳定版
 #
 # 版本号的唯一 owner 是 module.prop（见 docs/KNOWN_ISSUES.md 第 10b 节）。
-# tag 名由它推导，本文件不维护任何版本字面量。
+# 稳定 tag 名由它推导；预发布 tag 在它之上追加一个由 git 推导的序号。
+# 本文件不维护任何版本字面量。
 
 on:
   push:
@@ -150,6 +158,9 @@ jobs:
   # （用 $env:TEMP 与 Start-Process -WindowStyle），在 Linux 上的行为未经验证。
   # 与其在 CI 里赌它们的可移植性，不如在它们已知全绿的平台上跑。
   # 移植到 Linux 是一件独立的、需要单独验证的工作，见 docs/KNOWN_ISSUES.md 第 11 节。
+  #
+  # 这个 job 是 dev 通道的**闸门**：dev job 的 needs 是 [build, regression]，
+  # 所以审计或探针失败时不会发出任何预发布。
   regression:
     name: 契约审计与协议探针（Windows）
     needs: verify
@@ -188,9 +199,11 @@ jobs:
           }
           if ($failed.Count -gt 0) { throw "探针失败: $($failed -join ', ')" }
 
-  # ---------------------------------------------------------------------- 发布
+  # ------------------------------------------------------------------ 发布
+  # 稳定版通道。条件与 dev 通道**互斥**：这里要求"该版本还没有稳定 Release"，
+  # dev 通道要求"该版本已经有了稳定 Release"。两条通道永远只有一条动作。
   release:
-    name: 发布 Release
+    name: 发布稳定版 Release
     needs: [build, regression]
     runs-on: ubuntu-latest
     permissions:
@@ -215,6 +228,9 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
+          # 这一层防的是"重复 push 同一版本后，tag 被别人挪到 update-binary 已变的
+          # commit 上"：`gh release create --target` 对已存在的 tag 会忽略 target，
+          # 而 release 资产会被覆盖成新产物。dev 通道下面的 ancestry 校验同理。
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Release $tag 已存在 —— 本次只保留 artifact，不重复发布"
@@ -237,5 +253,117 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "NovaAI-MCP v$version" \
             --target "$GITHUB_SHA" \
+            --generate-notes \
+            dist/*.zip dist/*.sha256
+
+  # ------------------------------------------------- 预发布通道（push main 自动）
+  #
+  # 解决的是这件事：稳定版的版本号由人决定，于是"修了一个缺陷但没提版本"的
+  # commit 永远拿不到可下载产物。这里让**每次 push 到 main** 都产出
+  # v<version>-dev.<commit 数>，而 module.prop 仍然是版本号的唯一 owner。
+  #
+  # 序号取 `git rev-list --count HEAD` 而不是 run number：commit 数是仓库的
+  # 先天性质，本地跑同一段脚本就能得到与 CI 相同的数字，可复现、可审计。
+  # 代价是两条分支上同一 commit 会算出同一序号（见 docs/CI.md）。
+  #
+  # 只在**同版本稳定版已经发布**时动作。理由是精度而非命名冲突：GitHub 上
+  # `v0.05` 与 `v0.05-dev.9` 是同一命名空间里的两个独立名字，先建后者并不会
+  # 阻止前者。但 `v0.05` 必须指向"就是那个稳定构建"的 commit，不允许出现
+  # "v0.05 到底对应哪次构建"的含混。先稳定、后预发布。
+  #
+  # 判据用 `gh release view` 而不是查 tag ref：只建 tag 未发 Release 的中间
+  # 状态会误判，而"版本号已用掉、稳定 Release 还没发"的窗口真实存在
+  # （release 与 dev 并发运行，都只需 [build, regression]）。
+  #
+  # `--prerelease` 已加：GitHub 会把这类 Release 标成 Pre-release 并在 API 里
+  # 打上 prerelease 标志，比只靠 tag 后缀更容易被用户与工具识别。
+  # 初版曾以"会给 audit_shell.ps1 第 8 项造成假失败"为由不加 —— 实测该理由
+  # **不成立**（那一项只扫 build.sh / go build / zip -r 字样），已纠正。
+  dev:
+    name: 发布预发布（dev 通道）
+    needs: [build, regression]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+      # fetch-depth: 0 —— commit 数与 ancestry 校验都依赖完整历史，
+      # actions/checkout 默认只取一个 commit。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: module-zip
+          path: dist
+
+      - name: 推导预发布 tag 并校验序号
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.build.outputs.version }}"
+          stable="v$version"
+          # git 推导的序号：需要 fetch-depth: 0，否则 rev-list 会只看到浅历史并报错。
+          serial="$(git rev-list --count HEAD)"
+
+          # ---- 稳定版必须已经发布，否则本次不动作 ----
+          # 用 `gh release view` 而不是 `gh api .../git/ref/tags/...`：只建了 tag 而没
+          # 发 Release 的中间状态会误判，而"版本号已经用掉、稳定 Release 还没有"的
+          # 窗口是真实存在的（release job 与 dev job 并发）。
+          if ! gh release view "$stable" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "稳定版 $stable 尚未发布 —— dev 通道静默跳过（不是失败）"
+            exit 0
+          fi
+
+          # ---- 序号必须严格大于同版本的上一个预发布 ----
+          # 两条分支上同一个 commit 会算出同一个序号。GitHub 的 tag 不可移动，
+          # 若直接建同名 tag，`gh release create` 会失败并让 dev 这个 job 变红。
+          # 这里显式取"已存在的最大序号 + 1"，失败模式变成一条 if，而不是一次崩溃。
+          last="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+                  --json tagName --jq '.[].tagName' \
+                  | sed -n "s/^${stable}-dev\.\([0-9]\+\)$/\1/p" | sort -n | tail -n1)"
+          if [ -z "$last" ]; then
+            last=0
+          fi
+          if [ "$serial" -le "$last" ]; then
+            serial=$((last + 1))
+          fi
+          tag="${stable}-dev.${serial}"
+
+          # ---- tag 若已存在，必须指向本 commit 的祖先，否则拒绝 ----
+          # 与稳定通道的 gate 同理：不允许资产被换成另一个 commit 的产物。
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            if ! git merge-base --is-ancestor "refs/tags/$tag" "$GITHUB_SHA"; then
+              echo "::error::${tag} 已存在且不是本 commit 的祖先 —— 拒绝覆盖资产"
+              exit 1
+            fi
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "预发布 $tag（稳定版 $stable 已存在，序号 $serial）"
+
+      - name: 创建预发布 Release
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          ls -l dist
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
             --generate-notes \
             dist/*.zip dist/*.sha256

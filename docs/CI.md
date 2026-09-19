@@ -6,25 +6,80 @@
 
 | 事件 | 行为 |
 |------|------|
-| push 到 `main` | 构建 + 全部门禁；若 `module.prop` 的版本**还没有**对应 Release，就自动建 tag 并发布。同一版本重复 push 不会重复发布 |
-| push tag `v*` | 构建 + 全部门禁 + 发布该 tag；并要求 tag 与 `module.prop` 的版本一致，不一致直接失败 |
+| push 到 `main` | 构建 + 全部门禁，然后走**两条互斥的发布通道**：稳定版（见下）与预发布（见下） |
+| push tag `v*` | 构建 + 全部门禁 + 发布该 tag。稳定 tag `v<version>` 必须与 `module.prop` 一致；预发布 tag `v<version>-dev.<序号>` 走预发布通道 |
 | pull request → `main` | 只跑校验与构建，**永不发布** |
-| 手动 `workflow_dispatch` | 由 `publish` 开关决定是否发布；关闭时只上传 artifact |
+| 手动 `workflow_dispatch` | 由 `publish` 开关决定是否发布稳定版；关闭时只上传 artifact |
 
 版本号的唯一 owner 是 `module.prop`（见 [KNOWN_ISSUES](KNOWN_ISSUES.md) 第 10b 节）。
-tag 名由它推导，工作流里没有任何版本字面量。
+**稳定** tag 名由它推导，工作流里没有任何版本字面量。
 
-## 四个 job
+## 两条发布通道
+
+`ab0c368` 之后有一次真实的不一致：修复进了 `main`，流水线全绿，但 Release 里
+还是旧产物 —— 因为 `module.prop` 的 `version` 没人动过。稳定版的版本号**由人决定**
+这条规则要保留（`CI.md:14`），所以新增了一条与其**互斥**的预发布通道：
+
+| | 稳定通道（`release` job） | 预发布通道（`dev` job） |
+|---|---|---|
+| 触发 | tag `v*` / 手动 / push main 且该版本**尚无** Release | push main 或 push 预发布 tag |
+| 版本号 | `module.prop` 的 `version` | `module.prop` 的 `version` **+ git 序号** |
+| tag | `v0.05` | `v0.05-dev.9` |
+| 前置条件 | 该版本还没有 Release | 该版本**已经有**稳定 Release |
+| 产物 | 同名 zip | 同名 zip（内容与当次构建一致） |
+
+两者条件互补，所以每次 push 到 `main` 最多只有一条通道动作。
+
+```
+push main ──► verify ──► build ──┬──► release : v0.05 尚未发布 → 建 tag + Release
+                                 │              已发布     → 静默跳过
+              └──► regression ───┴──► dev     : v0.05 尚未发布 → 静默跳过
+                                                已发布     → v0.05-dev.<n>
+```
+
+### 为什么 dev 序号来自 `git rev-list --count HEAD`
+
+commit 数是仓库的先天性质：**本地跑同一段脚本能得到与 CI 相同的数字**，可复现、
+可审计，不需要查询任何外部状态。run number 做不到这一点（它只存在于 GitHub 上）。
+
+代价是两条分支上同一个 commit 会算出同一个序号。GitHub 的 tag 不可移动，直接建
+同名 tag 会让 `gh release create` 失败并把 `dev` job 判成红色。所以脚本会先查
+"同版本已发布的最大序号"，若 `serial <= last` 就取 `last + 1`。失败模式因此是一条
+`if`，而不是一次崩溃。
+
+### 为什么必须"先稳定、后预发布"
+
+GitHub 上 tag 是**全局命名空间且不可移动**。`v0.05` 与 `v0.05-dev.9` 是同一命名空间
+里的两个名字，先建 `v0.05-dev.9` 不会阻止之后建 `v0.05`。
+
+真正的理由是**精确性**：`v0.05` 必须指向"就是那个稳定构建"的 commit。若 dev 先占用
+了 tag 词法空间，稳定版的 tag 就只能在别的 commit 上创建，"`v0.05` 到底对应哪次构建"
+就不再唯一 —— 而 CI 已经为一个版本的 tag 与 Release 花掉了一份注意力，重复使用这个
+名字只会让"哪个 commit 是 v0.05"变得含混。
+
+因此 `dev` job 的第一件事是检查 `v<version>` 是否**已经作为 Release** 存在；不存在就
+静默跳过（`publish=false`，不是失败）。这也意味着**首次 push 到 `main` 时只有稳定通道
+动作**，dev 通道从第二次起才生效。
+
+用 `gh release view` 而不是 `gh api .../git/ref/tags/...`：只建了 tag 而没发 Release 的
+中间状态会误判，而"版本号已经用掉、稳定 Release 还没有"的窗口是真实存在的 ——
+`release` 与 `dev` 并发运行，都只需 `[build, regression]`。
+
+## 五个 job
 
 | job | 平台 | 职责 | 是否阻断发布 |
 |-----|------|------|--------------|
 | `verify` | ubuntu | `gofmt -l` · `go vet` · `go test` · `bash -n`（8 个 shell 脚本） | 是 |
 | `build` | ubuntu | 调用 `build.sh all` 打包 → `verify_package.ps1` 校验 → 上传 artifact + sha256 | 是 |
 | `regression` | **windows** | `audit_actions.ps1` · `audit_shell.ps1` · `probe_mcp/session/limits.ps1` | 是 |
-| `release` | ubuntu | 判断该版本是否已有 Release，没有则 `gh release create` | — |
+| `release` | ubuntu | 稳定通道：判断该版本是否已有 Release，没有则 `gh release create` | — |
+| `dev` | ubuntu | 预发布通道：稳定版已发布时发 `v<version>-dev.<序号>` | — |
 
-`release` 的 `needs` 是 `[build, regression]`，所以审计或探针失败时**不会发布**。
-只有 `release` job 有 `contents: write`，其余 job 都是 `contents: read`。
+`release` 与 `dev` 的 `needs` 都是 `[build, regression]`，所以审计或探针失败时
+**两条通道都不会发布**。只有这两个 job 有 `contents: write`，其余都是 `contents: read`。
+
+它们共用 `concurrency: { group: publish-release }`：串行化，避免两次运行同时建同一个
+tag 或同一个 Release。
 
 ## 几个刻意的决定
 
@@ -101,12 +156,36 @@ pwsh -File scripts/probe_limits.ps1
 
 ## 发布流程
 
+### 稳定版（手动决定版本号）
+
 1. 改 `module.prop` 的 `version` 与 `versionCode`（唯一版本来源）。
 2. push 到 `main`。
 3. 流水线自动构建、校验、审计、探针，然后建 tag `v<version>` 并发布 Release，
    附 `NovaAI-MCP-v<version>.zip` 与同名 `.sha256`。
 
-要发预发布或补发某个版本，也可以 push 一个与 `module.prop` 一致的 tag。
+要补发某个版本，也可以 push 一个与 `module.prop` 一致的 tag。
+
+### 预发布（每次 push 到 main 自动）
+
+不需要任何操作。只要 `module.prop` 的版本**已经**发布过稳定版，每次 push 到 `main`
+都会自动发一个 `v<version>-dev.<序号>`，附同样的 zip 与 sha256。
+
+要让缺陷修复尽快可下载，**不需要**先提版本号 —— 这正是这条通道存在的理由。
+
+### 用户应当下载哪个
+
+| 想要 | 下载 |
+|---|---|
+| 稳定使用 | Releases 页里不带 `-dev.` 的最新版 |
+| 拿到最新的缺陷修复 | 带 `-dev.` 的最新版（CI 全绿，但未经真机验证） |
+
+注：预发布用 `gh release create --prerelease` 标记，GitHub 会把它归入
+Pre-release 并在 API 里打上 `prerelease` 标志，因此用户与工具都能可靠区分，
+不必只靠 tag 名后缀。
+
+（初版曾以"会给 `audit_shell.ps1` 第 8 项造成假失败"为由不加这个参数，
+实测该理由**不成立** —— 那一项只扫描 `build.sh` / `go build` / `zip -r` 字样，
+`--prerelease` 三者都不含。已纠正。）
 
 ## 边界
 
