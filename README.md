@@ -94,7 +94,28 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 > 详见 [docs/config.md](docs/config.md)。
 >
 > **通用文件与 shell 载体还会过一道受保护路径判定**（分区、`/data/adb/modules`、
-> 模块自身配置等），详见 [docs/security.md](docs/security.md)。
+> 模块自身配置、`/sdcard/Android/{data,obb}` 只读等），详见 [docs/security.md](docs/security.md)。
+
+## ⚠️ 升级须知（配置校验收紧）
+
+自本次提交起，配置加载时新增三条**危险组合**拒绝规则。下列配置在升级后会
+**拒绝启动**，需要先修正：
+
+| 组合 | 后果 | 修正 |
+|------|------|------|
+| `security.anonymous: true` + `validateHost: false` | 任何本机 App 均可免认证驱动 root 工具 | 打开 `validateHost` |
+| `security.anonymous: true` + `validateOrigin: false` | 任意网页可盲打 root 工具（`text/plain` 不触发 preflight） | 打开 `validateOrigin` |
+| `security.allowCors: true` + `validateOrigin: false` | CORS 反射任意 Origin，网页可带 token 全权访问 | 打开 `validateOrigin` |
+
+同时，指向**不存在 profile** 的 `sessionBinding`（`fallback` 或
+`byTokenHash` 的值）现在会被拒绝。此前它会静默回退到一个"白名单通配 +
+`riskCeiling: 1`"的虚构 profile —— 一个 typo（`readonly` → `redonly`）会把
+只读身份提升为可写。
+
+单独关闭 `validateOrigin`（不开 `anonymous`、不开 `allowCors`）**仍然允许**，
+例如原生客户端配自建前端的场景不受影响。
+
+背景与判定依据见 [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) 第 12 节。
 
 ## 逆向工具
 
