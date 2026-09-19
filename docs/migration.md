@@ -91,7 +91,7 @@ unsupported schemaVersion: <n>
 | 键 | 原因 |
 |----|------|
 | `paths.crashDir` | 崩溃处理器必须在配置加载**之前**装好，这个旋钮永远不可能生效；崩溃目录固定为 `{stateDir}/crash` |
-| `capabilities` | 顶层 `map[string]bool`，Go 侧零访问、shell 侧零读取；`config.example.json` 自己注释为"保留字段"。能力探测由 `novaai_capabilities` 工具在运行时执行 |
+| `capabilities` | 顶层 `map[string]bool`，Go 侧零访问、shell 侧零读取；原示例文件自己注释为"保留字段"。能力探测由 `novaai_capabilities` 工具在运行时执行 |
 
 第二批的清单里漏了 `paths.crashDir` 与 `capabilities`。前者和 `downloadsDir`
 那四个一样是"只声明不生效"，但多一层硬约束：`main.go` 的顺序是

@@ -99,6 +99,13 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 			_ = json.Unmarshal(args, &in)
 			p := resolvePath(deps, in.Path)
 
+			// 读取守卫刻意很窄：只挡块设备与内核参数。
+			// 在此之前 fs_read 完全没有守卫，`cat /dev/block/by-name/boot`
+			// 会把整个分区的原始字节塞进工具结果。
+			if err := guardRead(p); err != nil {
+				return errFail("PROTECTED_PATH", err.Error()), nil
+			}
+
 			if in.Length <= 0 {
 				in.Length = 262144
 			}
@@ -158,12 +165,13 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 	// ---- fs_write ----
 	reg("novaai_fs_write", "写入文件", "创建、追加、截断、补丁写入或更新时间戳",
 		objSchema(map[string]any{
-			"action":        enumProp("明确操作", "create", "append", "truncate", "patch", "touch"),
-			"path":          strProp("文件路径"),
-			"content":       strProp("内容"),
-			"encoding":      enumProp("编码", "utf-8", "text", "base64"),
-			"offset":        intProp("写入偏移"),
-			"createParents": boolProp("自动创建父目录"),
+			"action":           enumProp("明确操作", "create", "append", "truncate", "patch", "touch"),
+			"path":             strProp("文件路径"),
+			"content":          strProp("内容"),
+			"encoding":         enumProp("编码", "utf-8", "text", "base64"),
+			"offset":           intProp("写入偏移"),
+			"createParents":    boolProp("自动创建父目录"),
+			"confirmDangerous": boolProp("确认对 /sdcard/Android/{data,obb} 的变更"),
 		}, "action", "path"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -173,12 +181,20 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				Encoding      string `json:"encoding"`
 				Offset        int    `json:"offset"`
 				CreateParents bool   `json:"createParents"`
+				Confirm       bool   `json:"confirmDangerous"`
 			}
 			_ = json.Unmarshal(args, &in)
 			p := resolvePath(deps, in.Path)
 
-			if err := guardPath(p, false); err != nil {
-				return errFail("PROTECTED_PATH", err.Error()), nil
+			// /sdcard/Android/{data,obb} 默认拒绝写入；只有显式
+			// confirmDangerous 才放行（硬拒绝位置不受它影响）。
+			if err, confirmable := guardPathStrict(p, false); err != nil {
+				if confirmable && in.Confirm {
+					err = guardPathConfirmed(p, false)
+				}
+				if err != nil {
+					return errFail("PROTECTED_PATH", err.Error()), nil
+				}
 			}
 
 			if in.CreateParents {
@@ -320,7 +336,9 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				if !in.Confirm {
 					return errFail("NOT_CONFIRMED", "remove 需要 confirmDangerous: true"), nil
 				}
-				if err := guardPath(p, in.Recursive); err != nil {
+				// 到这一步 confirmDangerous 已经为 true，因此可确认档放行；
+				// 硬拒绝（/system、/data/adb/modules…）仍然拒绝。
+				if err := guardPathConfirmed(p, in.Recursive); err != nil {
 					return errFail("PROTECTED_PATH", err.Error()), nil
 				}
 				var err error

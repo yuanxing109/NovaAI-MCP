@@ -160,6 +160,43 @@ func guardPath(p string, recursive bool) error {
 	return pathguard.Check(p, recursive).Err()
 }
 
+// guardPathConfirmed 与 guardPath 相同，但把 androidDataRoots 视为已确认。
+//
+// 只有调用方**已经拿到 confirmDangerous** 时才能用。
+func guardPathConfirmed(p string, recursive bool) error {
+	return pathguard.ConfirmCheck(p, recursive).Err()
+}
+
+// guardPathStrict 判定一次变更，并区分"硬拒绝"与"可确认档"。
+//
+// 返回的 confirmable 为 true 表示路径落在 /sdcard/Android/{data,obb}：
+// 默认拒绝，调用方在 confirmDangerous=true 时应改用 guardPathConfirmed 重试。
+//
+// 关于安全的诚实说明：confirmDangerous 是**模型自己填的布尔值**，
+// 无法证明真的发生过用户判断。在真实客户端里它通常被渲染成一个需要人
+// 点确认的提示，但那是客户端的善意，不是本服务能强制的。因此这一档提供
+// 的是"默认不会误删别的应用的数据"，而不是"对抗已沦为攻击者的模型" ——
+// 后者要靠 profile（把 token 绑到 readonly）。
+func guardPathStrict(p string, recursive bool) (err error, confirmable bool) {
+	d := pathguard.Check(p, recursive)
+	if d.Allowed {
+		return nil, false
+	}
+	if d.Confirmable {
+		return d.ErrConfirmable(), true
+	}
+	return d.Err(), false
+}
+
+// guardRead 判定一次**只读**访问。
+//
+// 读取刻意比写入宽松：/sdcard/Android/data 下的内容本来就该能读
+// （同一棵树上有用户自己的 DCIM、Download），stateDir 里的 config.json
+// 也一直可读。仍然拒绝读取的只有 /dev/block 这类块设备。
+func guardRead(p string) error {
+	return pathguard.CheckRead(p).Err()
+}
+
 // idRe 校验所有会被拼进文件路径的标识符（模块 ID、技能 ID、scheduleId…）。
 //
 // 必须以字母或数字开头，因此 ".."、"../x"、"/abs" 一律不通过；

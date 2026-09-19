@@ -29,6 +29,14 @@ type Decision struct {
 	Path    string `json:"path"` // 归一化后的路径
 	Rule    string `json:"rule,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+
+	// Confirmable 为 true 表示：默认拒绝，但调用方可以在拿到**带外**
+	// 用户确认（confirmDangerous）后重试。见 ConfirmCheck。
+	//
+	// 它存在的理由：/sdcard/Android/data 既不是"永远不能动"（用户卸载
+	// 残留、清理某个应用的缓存都是正当需求），也不是"随便动"。
+	// 二分法（允许/拒绝）表达不了这一档，于是加了第三个状态。
+	Confirmable bool `json:"confirmable,omitempty"`
 }
 
 func (d Decision) Err() error {
@@ -36,6 +44,12 @@ func (d Decision) Err() error {
 		return nil
 	}
 	return fmt.Errorf("路径受保护（%s）：%s", d.Rule, d.Path)
+}
+
+// ErrConfirmable 是 Confirmable 场景下的错误，向调用方说明"加确认可过"。
+func (d Decision) ErrConfirmable() error {
+	return fmt.Errorf("路径受保护（%s）：%s —— 变更需用户确认（confirmDangerous）",
+		d.Rule, d.Path)
 }
 
 // rule 一条硬拒绝规则。
@@ -79,6 +93,44 @@ var fixedDeny = []rule{
 	{prefix: "/data/adb/lspd", why: "LSPosed 自身"},
 	{prefix: "/data/adb/post-fs-data.d", why: "开机脚本目录"},
 	{prefix: "/data/adb/service.d", why: "开机脚本目录"},
+}
+
+// androidDataRoots 是「只读根」：读放行，任何变更默认拒绝。
+//
+// 与 fixedDeny 的区别是判据不同。fixedDeny 问的是"改了会不会开不了机"；
+// 这里问的是"改了会不会让别的应用丢数据、且用户无从察觉"。
+// Android/data 与 Android/obb 是**其他应用**的私有外部存储：
+// 以 root 写进去不会让设备变砖，但会静默破坏那个应用的状态，通常不可恢复。
+//
+// 必须覆盖全部别名，不能被符号链接绕过：在 /sdcard/Android 下，
+// data 与 obb 是指向 /storage/emulated/0/Android/{data,obb} 的符号链接，
+// 而 /mnt/sdcard 又是 /storage/emulated/0 的别名。只写一条会被另一条绕过。
+//
+// 与 fixedDeny 一样按路径分量比较，所以 /sdcard/Android/database
+// 不会被 /sdcard/Android/data 误伤。
+var androidDataRoots = []rule{
+	{prefix: "/sdcard/Android/data", why: "应用私有外部存储"},
+	{prefix: "/sdcard/Android/obb", why: "应用私有 OBB 资源"},
+	{prefix: "/storage/emulated/0/Android/data", why: "应用私有外部存储"},
+	{prefix: "/storage/emulated/0/Android/obb", why: "应用私有 OBB 资源"},
+	{prefix: "/data/media/0/Android/data", why: "应用私有外部存储"},
+	{prefix: "/data/media/0/Android/obb", why: "应用私有 OBB 资源"},
+	{prefix: "/mnt/sdcard/Android/data", why: "应用私有外部存储"},
+	{prefix: "/mnt/sdcard/Android/obb", why: "应用私有 OBB 资源"},
+}
+
+// readDeny 是**唯一**在读取路径上仍然拒绝的前缀。
+//
+// 为什么不是直接用 fixedDeny：那两个集合回答的是不同的问题。
+// fixedDeny 问"改了会不会开不了机"，所以它包含 /data/adb/modules ——
+// 但**读** module.prop 正是 agent 排查模块问题的正常手段，用写入规则去
+// 限制读取会砍掉真实能力（novaai_fs_read 目前完全没有守卫，收紧必须是
+// 有理由的收紧，而不是顺手扩大一个已有集合的适用范围）。
+//
+// 这里只留下"读它没有任何正当用途、且会把设备内容拖进工具结果"的位置。
+var readDeny = []rule{
+	{prefix: "/dev/block", why: "块设备节点"},
+	{prefix: "/proc/sys", why: "内核参数"},
 }
 
 // stateDirAllow stateDir 内仍然允许通用工具写入的子树。
@@ -161,7 +213,23 @@ func stateDirRule() rule {
 //
 // recursive 为 true 时额外应用 criticalRoots：删掉 /data、/sdcard 这类根
 // 等同于格机，即使它们本身不在 fixedDeny 里。
+//
+// 判定顺序有意如此：先 fixedDeny（不可协商），再 androidDataRoots
+// （默认拒绝但可确认），最后 stateDir。把可确认的一档放在硬拒绝之后，
+// 是为了让"某个路径同时命中两类规则"时取更严的那个。
 func Check(p string, recursive bool) Decision {
+	return check(p, recursive, false)
+}
+
+// ConfirmCheck 与 Check 相同，但把 androidDataRoots 视为已确认放行。
+//
+// 调用方只有在**已经拿到用户确认**之后才能用这个入口 —— 确认本身
+// 必须发生在模型够不着的地方，见各工具对 confirmDangerous 的处理。
+func ConfirmCheck(p string, recursive bool) Decision {
+	return check(p, recursive, true)
+}
+
+func check(p string, recursive, confirmed bool) Decision {
 	n := Normalize(p)
 	if n == "" {
 		return Decision{Allowed: true, Path: n}
@@ -182,6 +250,14 @@ func Check(p string, recursive bool) Decision {
 	if d := matchRules(n, fixedDeny); !d.Allowed {
 		return d
 	}
+
+	if !confirmed {
+		if d := matchRules(n, androidDataRoots); !d.Allowed {
+			d.Confirmable = true
+			return d
+		}
+	}
+
 	return matchRules(n, []rule{stateDirRule()})
 }
 
@@ -191,7 +267,25 @@ func CheckRecursiveDelete(p string) Decision { return Check(p, true) }
 // CheckWrite 是 Check(p, false) 的语义化别名。
 func CheckWrite(p string) Decision { return Check(p, false) }
 
-// CheckSystemPath 只判定 fixedDeny 与 criticalRoots，不含 stateDir。
+// CheckRead 判定一次**只读**访问。
+//
+// 读取刻意比写入宽松得多，理由有二：
+//   - /sdcard/Android/{data,obb} 的语义就是"只能读不能动"，读是承诺的能力；
+//   - stateDir 里的 config.json 一直可被 novaai_fs_read 读，且
+//     novaai_config export 就是要把配置读出来。
+//
+// 因此这里**不**复用 fixedDeny，只用 readDeny（块设备与内核参数）。
+// 也不应用 criticalRoots —— 那限制的是递归删除，与读无关。
+func CheckRead(p string) Decision {
+	n := Normalize(p)
+	if n == "" {
+		return Decision{Allowed: true, Path: n}
+	}
+	return matchRules(n, readDeny)
+}
+
+// CheckSystemPath 只判定 fixedDeny 与 criticalRoots，不含 stateDir 与
+// androidDataRoots。
 //
 // 用于归档恢复：备份本来就是模块自己的数据，恢复回 stateDir 是合法操作，
 // 但归档里混入 /system 或 /data/adb/modules 的条目必须拒绝。
@@ -376,6 +470,15 @@ func ProtectedPaths() []string {
 		out = append(out, r.prefix)
 	}
 	out = append(out, StateDir())
+	return out
+}
+
+// ReadOnlyPaths 返回"可读、变更需确认"的前缀。
+func ReadOnlyPaths() []string {
+	out := make([]string, 0, len(androidDataRoots))
+	for _, r := range androidDataRoots {
+		out = append(out, r.prefix)
+	}
 	return out
 }
 

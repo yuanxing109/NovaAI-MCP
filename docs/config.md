@@ -2,6 +2,156 @@
 
 配置文件路径: `/data/adb/novaai-mcp/config.json`
 
+> **本节是这份契约的唯一定义处。** 此前另有一份 `docs/config.example.json`，
+> 它是同一份契约的第二个 owner —— 没有任何测试能保证它与 `internal/config`
+> 同步，两份必然漂移。现已合并到这里。
+>
+> 字段的权威来源是 `internal/config/types.go` 与 `internal/config/default.go`；
+> 一份逐键比对的测试（`config/example_test.go`）断言下面的 JSON 与结构体的
+> json tag 完全一致，任一侧增删字段都会立刻失败。
+
+---
+
+## 完整配置（可直接复制）
+
+下面的内容与全新安装生成的 `config.json` 等价。`value` 留空是因为
+首次启动会随机生成并写入 `{stateDir}/token`。
+
+```json
+{
+  "schemaVersion": 3,
+
+  "network": {
+    "port": 5322,
+    "listenLoopback": true,
+    "listenLan": false,
+    "allowedOrigins": []
+  },
+
+  "paths": {
+    "stateDir": "/data/adb/novaai-mcp",
+    "workDir": "/storage/emulated/0/novaaiAI",
+    "workspaceRoot": "/data/adb/novaai-mcp/workspace",
+    "auditDir": "/data/adb/novaai-mcp/audit"
+  },
+
+  "limits": {
+    "maxRequestBytes": 67108864,
+    "shellTimeoutSeconds": 60,
+    "resultPreviewBytes": 1048576,
+    "shutdownGraceSeconds": 30
+  },
+
+  "security": {
+    "anonymous": false,
+    "validateHost": true,
+    "validateOrigin": true,
+    "allowCors": false,
+
+    "token": {
+      "enabled": true,
+      "value": "",
+      "rotateOnStart": false,
+      "allowQueryParam": false
+    },
+
+    "unixSocket": {
+      "enabled": true,
+      "path": "/data/adb/novaai-mcp/mcp.sock",
+      "mode": "0660",
+      "sepolicyInject": true
+    },
+
+    "lan": {
+      "enabled": false,
+      "allowedCidr": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+    }
+  },
+
+  "profiles": {
+    "default": {
+      "allowTools": ["*"],
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule",
+                    "novaai_config", "novaai_root_module", "novaai_systemless"],
+      "riskCeiling": 3
+    },
+    "readonly": {
+      "allowTools": ["novaai_status", "novaai_capabilities", "novaai_health_status",
+                     "novaai_root_info", "novaai_device_info", "novaai_fs_info",
+                     "novaai_fs_read", "novaai_fs_search", "novaai_fs_hash",
+                     "novaai_app_list", "novaai_app_info", "novaai_process",
+                     "novaai_log", "novaai_skill", "novaai_diagnostics",
+                     "novaai_session_status", "novaai_session_list",
+                     "novaai_audit_status", "novaai_auth_status"],
+      "denyTools": [],
+      "riskCeiling": 0
+    },
+    "reverse": {
+      "allowTools": ["novaai_reverse_*", "novaai_hook_*", "novaai_fs_read",
+                     "novaai_fs_info", "novaai_app_info", "novaai_app_list",
+                     "novaai_process", "novaai_log", "novaai_device_info",
+                     "novaai_status", "novaai_session_*"],
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule",
+                    "novaai_power", "novaai_root_module"],
+      "riskCeiling": 3
+    },
+    "agent_full": {
+      "allowTools": ["*"],
+      "denyTools": [],
+      "riskCeiling": 3
+    }
+  },
+
+  "sessionBinding": {
+    "byTokenHash": {},
+    "fallback": "default"
+  },
+
+  "audit": {
+    "enabled": true,
+    "maxFileBytes": 10485760,
+    "maxFiles": 20,
+    "retentionDays": 30,
+    "includeArgs": true,
+    "argPreviewBytes": 256,
+    "allowlistFields": ["action", "path", "package", "name", "query",
+                        "url", "tool", "pattern", "cmd", "command"]
+  },
+
+  "rateLimit": {
+    "global": { "qps": 50, "burst": 100 },
+    "perSession": { "qps": 20, "burst": 40, "maxConcurrentTools": 5 },
+    "perTool": {
+      "novaai_log":     { "qps": 2,  "burst": 4 },
+      "novaai_network": { "qps": 5,  "burst": 10 },
+      "novaai_shell":   { "qps": 10, "burst": 20 }
+    }
+  },
+
+  "session": {
+    "idleTimeoutSeconds": 1800,
+    "maxSessions": 32,
+    "sweepIntervalSeconds": 300
+  },
+
+  "uninstall": {
+    "purgeInternalState": false,
+    "purgeAuditLogs": false,
+    "purgeCrashDumps": false,
+    "purgeUserData": false
+  }
+}
+```
+
+**关掉限流**：把 `rateLimit` 各层的 `qps` 设为 `0`。`qps <= 0` 表示"该层
+不限流"，`maxConcurrentTools: 0` 表示不限并发 —— 不需要删代码。
+
+**本机免 token**：`security.anonymous: true`。它**只对 loopback 生效**，
+局域网访问始终强制 token（`lan.enabled` 与 `token.enabled` 的组合由启动
+校验强制）。
+
+**会被拒绝启动的组合**见 [security.md](security.md#启动时的组合校验)。
+
 ---
 
 ## 配置结构

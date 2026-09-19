@@ -63,6 +63,57 @@
 | `rm -rf /data/local/tmp/*` | 放行 |
 | `rm -rf /sdcard/DCIM/*` | 放行 |
 
+### 4. 只读根 —— `/sdcard/Android/{data,obb}`
+
+这一档的判据和前两层不同：前两层问"改了会不会**开不了机**"，这一层问
+"改了会不会让**别的应用**丢数据、而且用户无从察觉"。
+
+`Android/data` 与 `Android/obb` 是其他应用的私有外部存储。以 root 写进去
+不会让设备变砖，但会静默破坏那个应用的状态，通常不可恢复。因此：
+
+**读：放行。变更：默认拒绝，`confirmDangerous: true` 后放行。**
+
+| 操作 | 结果 |
+|------|------|
+| 读 `/sdcard/Android/data/com.x/files/a` | 放行 |
+| 写 `/sdcard/Android/data/com.x/files/a` | 拒绝（可确认） |
+| 同上 + `confirmDangerous: true` | 放行 |
+| 删 `/sdcard/Android/data/com.x` + 确认 | 放行 |
+| 任何对 `/system` `/data/adb/modules` 的变更 + 确认 | **仍然拒绝** |
+
+覆盖全部别名：`/sdcard`、`/storage/emulated/0`、`/data/media/0`、
+`/mnt/sdcard`，各自带 `Android/data` 与 `Android/obb`。这不是冗余 ——
+在 `/sdcard/Android` 下，`data` 与 `obb` 是指向 `/storage/emulated/0/...`
+的符号链接，只写一条会被另一条绕过，而绕过是静默的。
+
+判定按路径分量进行，因此 `/sdcard/Android/media`（公开目录）与
+`/sdcard/Android/database`（目录名相近但分量不同）不受影响。
+
+**确认能做什么、不能做什么** —— 这里必须说清楚，避免高估这一层：
+
+`confirmDangerous` 是**模型自己填的布尔值**。本服务无法强制它先问过用户。
+在真实客户端里它通常被渲染成一个需要人点确认的提示，但那是客户端的善意，
+不是服务端的保证。所以这一档提供的是：
+
+- ✅ 默认不会误删别的应用的数据（模型的常见失误）
+- ❌ 不能对抗已沦为攻击者的模型
+
+要对抗后者，正确做法是把 token 绑到 `readonly` profile，而不是依赖确认。
+
+### 5. 读取守卫为什么比写入窄得多
+
+`novaai_fs_read` 走的是另一个判定（`pathguard.CheckRead`），只拒绝
+`/dev/block` 与 `/proc/sys`。
+
+刻意不复用写入那套前缀集合，理由有两条：
+
+- `fixedDeny` 含 `/data/adb/modules`，但**读** `module.prop` 正是排查模块
+  问题的正常手段；用写入规则去限制读取会砍掉真实能力；
+- `/sdcard/Android/data` 的语义就是"只能读不能动"，读是这一档承诺的能力。
+
+`cat /dev/block/by-name/boot` 在此之前完全没有守卫，会把整个分区的原始
+字节塞进工具结果 —— 这是这次收紧唯一针对的目标。
+
 ## 符号链接
 
 判定前会解析已存在部分的符号链接。否则
@@ -135,11 +186,34 @@
 
 | 错误码 | 触发 |
 |--------|------|
-| `PROTECTED_PATH` | 通用载体的目标路径落在受保护位置 |
+| `PROTECTED_PATH` | 目标路径落在受保护位置，或落在只读根且未确认 |
 | `UNSAFE_ARCHIVE` | 备份归档含绝对路径、`..` 或受保护成员 |
 | `INVALID_PARAM` | ID 类参数（`moduleId` / `scheduleId` / 技能 `id`）未通过白名单 |
+| `-32001` | Host/Origin 校验失败，或鉴权失败 |
 | `-32003` | profile 不允许该工具 |
 | `-32009` | 触发限流 |
+| `-32010` | 并发调用数超过上限 |
+
+## 启动时的组合校验
+
+`internal/config.Validate` 拒绝的不只是单个取值，还有**合在一起才危险**
+的配置。这类配置每个开关单独看都合法，不可能靠逐字段检查发现：
+
+| 组合 | 后果 |
+|------|------|
+| `anonymous` + `!validateHost` | DNS rebinding 后浏览器与端口同源，失去唯一来源校验 |
+| `anonymous` + `!validateOrigin` | 任意网页可跨源盲打 root 工具 |
+| `allowCors` + `!validateOrigin` | CORS 反射任意 Origin，网页可带 token 全权访问 |
+| `lan.enabled` + `!token.enabled` | 局域网裸奔 |
+| 绑定指向不存在的 profile | 过去会静默回退到比 `default` 更宽松的档位 |
+
+`anonymous` + `!validateOrigin` 之所以危险，是因为服务端**不检查
+Content-Type**（只按字节解析 JSON）。`text/plain` 的请求因此属于"简单请求"，
+不触发 preflight，会被真正发出并执行 —— 攻击者读不到响应，但 root 工具的
+副作用不需要读响应。
+
+单独关掉 `validateOrigin`（不开 anonymous、不开 CORS）**是允许的**：
+那是"原生客户端 + 自建前端"的常见组合，危害面显著小于上面几种。
 
 ## 已决策的边界（追认）
 

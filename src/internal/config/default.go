@@ -3,13 +3,20 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"path/filepath"
+	"path"
 )
 
 func Default() *Config {
 	stateDir := "/data/adb/novaai-mcp"
 	token := generateToken()
 
+	// 注意用 path.Join 而不是 filepath.Join。
+	//
+	// 这些是 **Android 的 POSIX 路径**，不管进程跑在哪个平台上都必须保持
+	// 正斜杠。filepath.Join 在 Windows 上会把分隔符换成 "\"，于是同一份
+	// 配置在开发机上生成的是 `\data\adb\novaai-mcp\workspace`，在设备上
+	// 才是 `/data/adb/novaai-mcp/workspace`。前者会被 pathguard 当成
+	// 相对路径（Normalize 对不以 "/" 开头的输入原样返回），保护判定静默失效。
 	return &Config{
 		SchemaVersion: 3,
 		Network: Network{
@@ -21,8 +28,8 @@ func Default() *Config {
 		Paths: Paths{
 			StateDir:      stateDir,
 			WorkDir:       "/storage/emulated/0/novaaiAI",
-			WorkspaceRoot: filepath.Join(stateDir, "workspace"),
-			AuditDir:      filepath.Join(stateDir, "audit"),
+			WorkspaceRoot: path.Join(stateDir, "workspace"),
+			AuditDir:      path.Join(stateDir, "audit"),
 		},
 		Limits: Limits{
 			MaxRequestBytes: 67108864,
@@ -46,7 +53,7 @@ func Default() *Config {
 			},
 			UnixSocket: UnixSocket{
 				Enabled:        true,
-				Path:           filepath.Join(stateDir, "mcp.sock"),
+				Path:           path.Join(stateDir, "mcp.sock"),
 				Mode:           "0660",
 				SepolicyInject: true,
 			},

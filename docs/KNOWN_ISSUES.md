@@ -99,7 +99,8 @@ CI 用**同一个** `verify_package.ps1` 校验 `build.sh` 的产物。
 `paths.auditDir` 保留可配置：审计日志在配置加载**之后**才初始化，能真正读到它。
 
 **`capabilities`**（`map[string]bool`）：Go 侧零访问、shell 侧零读取，
-`config.example.json` 自己把它注释为"保留字段"。唯一同名的地方是
+原示例文件自己把它注释为"保留字段"（该文件已删除，见第 8 节追记）。
+唯一同名的地方是
 `server.go` 里 MCP `initialize` 参数的局部结构体，以及探针脚本里对
 `initialize` 响应的 `capabilities.tools` 断言 —— 都与配置无关。
 能力探测本身由 `novaai_capabilities` 工具在运行时执行，不读配置。
@@ -331,10 +332,19 @@ out of range [1:0]`，一个把真正原因藏起来的错误。删除 `route` /
   且文件名与 `common.sh` 的 `ZCR_PID_FILE` 一致。这是 G2 的回归防线。
 - `src/internal/tools/v02/reverse_test.go` —— `apktool.jar` 必须从可执行文件
   位置推导，且**不得**再指向状态目录副本。这是 G4 的回归防线。
-- `src/internal/config/example_test.go` —— `docs/config.example.json` 的键集合必须
-  与 `Config` 的 json tag **完全一致**，且示例里不允许出现"保留字段"式说明。
+- `src/internal/config/example_test.go` —— `docs/config.md` 里「完整配置」一节
+  的键集合必须与 `Config` 的 json tag **完全一致**，取值必须与 `Default()`
+  一致，且示例里不允许出现"保留字段"式说明。
   这是对 `crashDir` / `capabilities` 那类漂移的结构化防线：按名字做全仓文本
   计数会假阴性，键集合比对不会。
+
+  > **追记（本轮）**：`docs/config.example.json` 已删除，其内容并入
+  > `docs/config.md`。删它的理由是它构成了**同一份契约的第二个 owner**——
+  > 与 `config.md` 并存时没有任何机制保证两者同步。测试改为从 markdown
+  > 的 ```json 围栏里取示例，闸门一道没少，owner 少了一个。
+  > 随之新增的取值比对当场抓到一个真实缺陷：`default.go` 用
+  > `filepath.Join` 拼接 Android 路径，在 Windows 上产出反斜杠
+  > （详见第 10 节）。
 
 > `audit_actions.ps1` 只扫描 `src/internal/tools`，因此它的"扫描工具数"
 > 是 56（v02 全部），不含 `internal/tools` 下用 `reg.Register(&Tool{...})`
@@ -429,3 +439,111 @@ PR 只跑门禁不发布。完整说明见 [CI.md](CI.md)。
 - **CI 无法验证真机安装**，也不做签名。
 - `GO_VERSION` 用的是 `stable`（`go.mod` 的 `go 1.22` 是语言下限，不是工具链）。
   要固定工具链需改工作流。
+
+## 12. 第五轮：授权边界与只读根
+
+本轮改动集中在三类问题上，都**只在 Windows 开发机上才会显现**或**只在
+配置组合错误时才触发**，因此此前无人发现。
+
+### 12a. profile 回退曾经是 fail-open（已修）
+
+`profile.Store.Get` 在名字不存在时返回一个**凭空构造**的 profile：
+`{AllowTools: ["*"], RiskCeiling: 1}`。
+
+同一个缺失条件，`middleware.go` 的 `profileFromContext` 用的是另一套语义
+（回退到名字 `"default"`）。两个 owner、两个答案。
+
+危害是具体的：`readonly` 的 `riskCeiling` 是 **0**，而构造出来的是 **1**。
+`novaai_fs_write` / `novaai_download` / `novaai_transfer_upload` 都在 risk 1，
+所以 `sessionBinding` 里把 `readonly` 打成 `redonly` 会把只读身份**提升**为可写。
+
+现在：回退到 `default`（真实存在、可审计），并且在 `config.Validate` 里
+**启动即拒绝**悬空的 profile 引用 —— 拼写错误不该留到运行时才静默换档位。
+
+### 12b. 危险安全组合无校验（已修）
+
+`Validate` 原本只查 4 件事。它**已经**正确地拒绝了一个危险组合
+（`lan.enabled` + `!token.enabled`），但对同类组合完全缺失：
+
+| 组合 | 后果 |
+|------|------|
+| `anonymous` + `!validateHost` | DNS rebinding 后浏览器与端口同源，失去唯一来源校验 |
+| `anonymous` + `!validateOrigin` | 任意网页可跨源盲打 root 工具 |
+| `allowCors` + `!validateOrigin` | CORS 反射任意 Origin，网页可带 token 全权访问 |
+
+第二条的关键在于服务端**不检查 Content-Type**（`middleware.go` 只按字节
+解析 JSON）。`text/plain` 的请求因此是"简单请求"，不触发 preflight，
+会被真正发出并执行；攻击者读不到响应，但 root 工具的副作用不需要读响应。
+
+单独关 `validateOrigin`（不开 anonymous、不开 CORS）仍然允许。
+
+### 12c. `filepath.Join` 用于 Android 路径（已修）
+
+`default.go` 与 `migrate.go` 用 `filepath.Join` 拼接 `/data/adb/novaai-mcp`
+下的子路径。在 Linux/Android 上与 `path.Join` 等价，所以问题在设备上不可见；
+在 **Windows 开发机**上它会产出 `\data\adb\novaai-mcp\workspace`。
+
+而 `pathguard.Normalize` 对不以 `/` 开头的输入**原样返回**，于是这条路径被
+当成相对路径，受保护判定静默失效 —— 不报错，只是不再保护。
+
+已全部改为 `path.Join`（`default.go` 3 处、`migrate.go` 1 处），
+并在 `config/paths_test.go` 里锁住"配置里的路径必须以 `/` 开头且不含反斜杠"。
+
+**这个 bug 是被新测试抓到的**，不是靠 review：把 `config.example.json` 并入
+`config.md` 时顺手加了一条"示例取值必须与 `Default()` 一致"的断言，
+它当场报出三处路径不一致。
+
+### 12d. `/sdcard/Android/{data,obb}` 此前**完全可写**（本次新增保护）
+
+`pathguard` 里原本没有任何一条 `Android/data` 规则。三层判定
+（`fixedDeny` / `criticalRoots` / `stateDir`）对
+`/sdcard/Android/data/com.x/` 全部不匹配，因此 `novaai_fs_write`、
+`fs_manage remove`、`archive` 都能直接删改它。
+
+新增第四层「只读根」：读放行，变更默认拒绝，`confirmDangerous: true` 后放行。
+硬拒绝位置（`/system`、`/data/adb/modules`…）**不受确认影响** ——
+否则确认就成了万能钥匙。
+
+覆盖全部别名（`/sdcard`、`/storage/emulated/0`、`/data/media/0`、
+`/mnt/sdcard`）。这不是冗余：`/sdcard/Android/data` 是指向
+`/storage/emulated/0/Android/data` 的符号链接，只写一条会被另一条绕过，
+而绕过是静默的。
+
+**已知残余风险**：
+
+- **`rm -rf /sdcard/Android` 未被拦截**。它不在 `criticalRoots` 里，因此
+  会连带清空 `data` 与 `obb`。这是一个真实的缺口，但修它需要改动
+  `criticalRoots` 的语义（那个集合的成员当前都可以被整体递归删除，
+  只要不命中 `fixedDeny`），影响面超出本次范围。已用
+  `TestAndroidDirItselfIsWritable` 记录现状，不会让它悄悄溜过去。
+- **`confirmDangerous` 是模型自己填的布尔值**，无法证明真的发生过用户判断。
+  真实客户端通常把它渲染成需要人点确认的提示，但那是客户端的善意，
+  不是服务端的保证。因此这一层提供的是"默认不会误删别的应用的数据"，
+  **不是**"对抗已沦为攻击者的模型"。对抗后者要靠 profile。
+- **`archive` / `transfer_upload` / `download` 尚未接入可确认档**。它们
+  经过 `guardPath`，因此对 `Android/data` 的写入会被**硬拒绝**（比只读更严，
+  不构成安全缺口），但用户也无法通过确认放行。接入方式与
+  `fs_write` / `fs_manage remove` 相同，待这些工具补齐 `confirmDangerous`
+  参数后一并处理。
+
+### 12e. 读取守卫（本次新增）
+
+`novaai_fs_read` 在此之前**没有任何路径守卫**，`cat /dev/block/by-name/boot`
+会把整个分区的原始字节塞进工具结果。
+
+新增 `pathguard.CheckRead`，但刻意**不复用 `fixedDeny`**：那个集合回答的是
+"改了会不会开不了机"，包含 `/data/adb/modules`；而**读** `module.prop`
+正是排查模块问题的正常手段。用写入规则去限制读取会砍掉真实能力。
+
+因此读取只拒绝 `/dev/block` 与 `/proc/sys`。这组用例在开发中被新测试
+当场纠偏过一次 —— 初版复用了 `fixedDeny`，被
+`TestCheckReadAllowsEverythingOrdinary` 判为过度收紧。
+
+### 12f. 未做的事
+
+- **限流没有删，也不建议删。** `qps <= 0` 与 `maxConcurrentTools <= 0`
+  已经是"关闭"开关（`bucket.allow` 与 `AcquireSlot` 都直接放行），
+  改配置即可，不需要动代码。
+- **token 认证对局域网不可关闭。** `anonymous` 只对 loopback 生效，
+  且 `Validate` 强制 `lan.enabled` 必须配 `token.enabled`。这是有意的：
+  「局域网自己用」恰恰是 token 最该开着的场景。

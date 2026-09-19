@@ -20,13 +20,29 @@ func NewStore(cfg *config.Config) *Store {
 	}
 }
 
+// Get 返回指定 profile。名字不存在时回退到 "default"。
+//
+// 这里曾经返回一个凭空构造的 profile（AllowTools: ["*"]、RiskCeiling: 1），
+// 那是 fail-open：它比 default 宽松，也必然比用户想绑定的那个 profile 宽松。
+// 具体后果是一个 typo —— `byTokenHash` 里把 "readonly" 写成 "redonly" ——
+// 会把只读身份提升为可写，而 readonly 的 ceiling 是 0，构造出来的却是 1
+// （已覆盖 novaai_fs_write / novaai_download / novaai_transfer_upload）。
+//
+// 回退到 default 而不是在这里报错，是因为本函数没有 error 返回位；配置层
+// （config.Validate）负责在启动时拒绝悬空的 profile 引用，运行时只保证
+// 绝不放行到比配置更宽的范围。
 func (s *Store) Get(name string) config.Profile {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if p, ok := s.profiles[name]; ok {
 		return p
 	}
-	return config.Profile{AllowTools: []string{"*"}, RiskCeiling: 1}
+	if p, ok := s.profiles["default"]; ok {
+		return p
+	}
+	// profiles 里连 default 都没有：这是配置错误，Validate 会拦。
+	// 真到了这里也只能给出最保守的形状——空白名单，而不是通配。
+	return config.Profile{AllowTools: []string{}, DenyTools: []string{}, RiskCeiling: 0}
 }
 
 func (s *Store) ResolveByTokenHash(hash string) string {

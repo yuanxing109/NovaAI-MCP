@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -111,8 +112,11 @@ func migrateV2ToV3(configPath string, raw []byte, tokenPath, stateDir string) er
 		"allowQueryParam": false,
 	}
 	sec["unixSocket"] = map[string]any{
-		"enabled":        true,
-		"path":           filepath.Join(stateDir, "mcp.sock"),
+		"enabled": true,
+		// path.Join 并非常规选择：这里是 **Android 的 POSIX 路径**，
+		// 写成 filepath.Join 会在 Windows 上生成 `\data\adb\...\mcp.sock`，
+		// 而这份 JSON 是要写到设备上给守护进程读的。
+		"path":           path.Join(stateDir, "mcp.sock"),
 		"mode":           "0660",
 		"sepolicyInject": true,
 	}
