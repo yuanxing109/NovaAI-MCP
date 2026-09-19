@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/novaai/novaai-mcp/internal/auth"
+	"github.com/novaai/novaai-mcp/internal/config"
 )
 
 var (
@@ -100,11 +101,9 @@ func migrateV2ToV3(configPath string, raw []byte, tokenPath, stateDir string) er
 		sec = map[string]any{}
 	}
 	sec["anonymous"] = false
-	sec["onLinkOnly"] = true
 	sec["validateHost"] = true
 	sec["validateOrigin"] = true
 	sec["allowCors"] = false
-	sec["dropFrontendUid"] = 2000
 	sec["token"] = map[string]any{
 		"enabled":         true,
 		"value":           token,
@@ -112,12 +111,11 @@ func migrateV2ToV3(configPath string, raw []byte, tokenPath, stateDir string) er
 		"allowQueryParam": false,
 	}
 	sec["unixSocket"] = map[string]any{
-		"enabled":           true,
-		"path":              filepath.Join(stateDir, "mcp.sock"),
-		"mode":              "0660",
-		"group":             "shell",
-		"sepolicyInject":    true,
-		"peerUidRecordOnly": true,
+		"enabled":        true,
+		"path":           filepath.Join(stateDir, "mcp.sock"),
+		"mode":           "0660",
+		"group":          "shell",
+		"sepolicyInject": true,
 	}
 	sec["lan"] = map[string]any{
 		"enabled":     false,
@@ -141,13 +139,7 @@ func migrateV2ToV3(configPath string, raw []byte, tokenPath, stateDir string) er
 
 func fillMissingV3Fields(cfg map[string]any, stateDir string) {
 	if _, ok := cfg["profiles"]; !ok {
-		cfg["profiles"] = map[string]any{
-			"default": map[string]any{
-				"allowTools":  []string{"*"},
-				"denyTools":   []string{},
-				"riskCeiling": 1,
-			},
-		}
+		cfg["profiles"] = defaultProfilesAsMap()
 	}
 	if _, ok := cfg["audit"]; !ok {
 		cfg["audit"] = map[string]any{
@@ -174,4 +166,21 @@ func fillMissingV3Fields(cfg map[string]any, stateDir string) {
 			"perTool":    map[string]any{},
 		}
 	}
+}
+
+// defaultProfilesAsMap 把 config.DefaultProfiles() 转成可写入 JSON 的形态。
+//
+// 迁移补齐的 profile 必须与全新安装完全一致，所以不能在这里另写一份定义：
+// 早期版本正是这么做的，且那份更宽松（default 的 denyTools 为空），
+// 结果是迁移上来的机器默认带 novaai_shell 权限。
+func defaultProfilesAsMap() map[string]any {
+	b, err := json.Marshal(config.DefaultProfiles())
+	if err != nil {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return map[string]any{}
+	}
+	return m
 }
