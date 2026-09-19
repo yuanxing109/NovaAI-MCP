@@ -19,7 +19,6 @@ var baseRiskLevels = map[string]int{
 	"novaai_app_info":       0,
 	"novaai_process":        0,
 	"novaai_log":            0,
-	"novaai_task":           0,
 	"novaai_skill":          0,
 	"novaai_diagnostics":    0,
 	"novaai_audit_status":   0,
@@ -82,10 +81,6 @@ var perActionRisk = map[string]map[string]int{
 		"logcat": 0, "kernel": 0, "dmesg": 0, "module": 0, "mcp": 0,
 		"stream": 1, "clear": 3,
 	},
-	"novaai_task": {
-		"get": 0, "list": 0, "logs": 0,
-		"update": 1, "cancel": 2,
-	},
 	"novaai_screen": {
 		"screenshot": 1, "foreground": 1, "record": 2, "wake": 2, "sleep": 2,
 	},
@@ -95,17 +90,15 @@ var perActionRisk = map[string]map[string]int{
 	},
 	"novaai_config": {
 		"get": 0, "validate": 0, "export": 0,
-		"update": 3, "reset": 3,
+		"update": 3,
 	},
+	// 只列真实存在的 action。早期这里还写着 web_extract / browser_capture /
+	// feed_parse / cookie_* / ws_* —— 那些 action 从未实现过。
 	"novaai_network": {
 		"interfaces": 0, "routes": 0, "dns": 0, "ping": 0,
 		"resolve": 0, "ports": 0, "connections": 0, "wifi": 0,
 		"proxy": 0, "connectivity": 0,
-		"http": 2, "web_extract": 2, "browser_capture": 2,
-		"feed_parse": 2, "cookie_list": 2, "cookie_set": 2,
-		"cookie_delete": 2, "cookie_clear": 2,
-		"ws_connect": 2, "ws_send": 2, "ws_receive": 2,
-		"ws_ping": 2, "ws_close": 2, "ws_list": 2,
+		"http": 2,
 	},
 }
 

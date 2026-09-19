@@ -6,7 +6,6 @@
 # 安装器都会导出 MODPATH（Magisk/KernelSU/APatch），优先使用；
 # 回退到脚本自身所在目录。
 MODDIR="${MODPATH:-${0%/*}}"
-ZIPFILE=${ZIPFILE:-$3}
 
 # ============ Root 框架识别 ============
 # Magisk   : MAGISK_VER / MAGISK_VER_CODE
@@ -56,7 +55,7 @@ fi
 
 # 版本号以 module.prop 为唯一来源，避免脚本内多处硬编码漂移
 MODVER="$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | head -n1 | cut -d= -f2)"
-[ -n "$MODVER" ] || MODVER="0.05"
+[ -n "$MODVER" ] || MODVER="unknown"
 
 # ============ 更新检测 ============
 IS_UPDATE="false"
@@ -150,7 +149,6 @@ mkdir -p "$OLD_STATE_DIR/workspace"
 mkdir -p "$OLD_STATE_DIR/audit"
 mkdir -p "$OLD_STATE_DIR/crash"
 mkdir -p "$OLD_STATE_DIR/skills"
-mkdir -p "$OLD_STATE_DIR/tools"
 mkdir -p /storage/emulated/0/novaaiAI
 mkdir -p /storage/emulated/0/novaaiAI/reverse
 
@@ -178,17 +176,25 @@ if [ -d "$MODDIR/skills" ]; then
   ui_print "  ✅ 技能文件已安装"
 fi
 
-# ============ 安装工具 ============
-ui_print "- 安装工具..."
-if [ -d "$MODDIR/bin/tools" ]; then
-  cp "$MODDIR/bin/tools/"*.jar "$OLD_STATE_DIR/tools/" 2>/dev/null
-  ui_print "  ✅ 工具已安装"
+# ============ 工具 jar ============
+# apktool/smali/baksmali 的 jar 不再复制到状态目录：wrapper 脚本与 daemon
+# 都直接从模块目录读取（<mod>/bin/tools/）。复制一份会让同一批 jar 在设备上
+# 存两遍（约 31 MiB）并可能版本漂移。见 docs/KNOWN_ISSUES.md。
+#
+# 升级清理：旧版本留下的状态目录副本是模块内容的冗余拷贝（可重建），
+# 删掉回收空间。
+if [ "$IS_UPDATE" = "true" ] && [ -d "$OLD_STATE_DIR/tools" ]; then
+  case "$OLD_STATE_DIR" in
+    /data/adb/novaai-mcp)
+      ui_print "- 清理旧版工具副本 ($OLD_STATE_DIR/tools)..."
+      rm -rf "$OLD_STATE_DIR/tools"
+      ui_print "  ✅ 已回收冗余 jar 副本"
+      ;;
+    *)
+      ui_print "  ⚠️ 状态目录校验失败，跳过工具副本清理"
+      ;;
+  esac
 fi
-
-# ============ 版本记录 ============
-echo "$MODDIR" > "$OLD_STATE_DIR/module_path"
-echo "$MODVER" > "$OLD_STATE_DIR/version"
-echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$OLD_STATE_DIR/install_time"
 
 # ============ 完成 ============
 ui_print ""
@@ -201,7 +207,7 @@ ui_print "- Unix Socket: $OLD_STATE_DIR/mcp.sock"
 ui_print "- Token 文件: $OLD_STATE_DIR/token"
 ui_print "- 配置文件: $OLD_STATE_DIR/config.json"
 ui_print "- 技能目录: $OLD_STATE_DIR/skills/"
-ui_print "- 工具目录: $OLD_STATE_DIR/tools/"
+ui_print "- 工具目录: $MODDIR/bin/tools/"
 ui_print ""
 if [ "$IS_UPDATE" = "true" ]; then
   ui_print "- 更新说明："

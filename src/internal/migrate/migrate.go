@@ -114,7 +114,6 @@ func migrateV2ToV3(configPath string, raw []byte, tokenPath, stateDir string) er
 		"enabled":        true,
 		"path":           filepath.Join(stateDir, "mcp.sock"),
 		"mode":           "0660",
-		"group":          "shell",
 		"sepolicyInject": true,
 	}
 	sec["lan"] = map[string]any{
@@ -148,7 +147,6 @@ func fillMissingV3Fields(cfg map[string]any, stateDir string) {
 			"maxFiles":        20,
 			"retentionDays":   30,
 			"argPreviewBytes": 256,
-			"redactMode":      "allowlist",
 			"allowlistFields": []string{"action", "path", "package", "name"},
 		}
 	}

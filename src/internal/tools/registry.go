@@ -82,6 +82,7 @@ type ctxKey string
 
 const (
 	ctxSessionID ctxKey = "novaai.session_id"
+	ctxProfile   ctxKey = "novaai.profile"
 	ctxDeps      ctxKey = "novaai.deps"
 )
 
@@ -94,6 +95,19 @@ func SessionIDFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// WithProfile 把本次请求 token 解析出的 profile 名放进 context。
+// 工具只应把它当只读信息展示，权限决策在 mcp 层统一做。
+func WithProfile(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, ctxProfile, name)
+}
+
+func ProfileFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxProfile).(string); ok && v != "" {
+		return v
+	}
+	return "default"
 }
 
 func WithDeps(ctx context.Context, d *Deps) context.Context {

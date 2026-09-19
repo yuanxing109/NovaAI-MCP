@@ -14,10 +14,11 @@ import (
 
 func registerRootTools(reg RegisterFn, deps *Deps) {
 	// ---- root_info ----
-	reg("novaai_root_info", "Root 信息", "检测 Root 框架、能力与运行时自检",
-		objSchema(map[string]any{
-			"action": enumProp("操作", "detect", "capabilities", "self_test"),
-		}, "action"),
+	// 无参数单动作工具：一次调用即返回框架、生效 UID 与 su 路径。
+	// 早期版本声明了 action(detect/capabilities/self_test)，但 handler
+	// 从不读它 —— 三个"动作"其实是同一个行为。
+	reg("novaai_root_info", "Root 信息", "检测 Root 框架与运行时身份",
+		objSchema(map[string]any{}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			framework := "Unknown"
 			detectedBy := ""
@@ -43,7 +44,7 @@ func registerRootTools(reg RegisterFn, deps *Deps) {
 	// ---- root_module ----
 	reg("novaai_root_module", "Root 模块", "管理 Magisk、KernelSU 或 APatch 模块生命周期",
 		objSchema(map[string]any{
-			"action":   enumProp("操作", "list", "info", "install", "update", "remove", "enable", "disable", "action", "backup", "restore", "logs"),
+			"action":   enumProp("操作", "list", "info", "install", "update", "remove", "enable", "disable", "logs"),
 			"moduleId": strProp("模块 ID"),
 			"path":     strProp("ZIP 路径"),
 			"zip":      strProp("ZIP 路径别名"),

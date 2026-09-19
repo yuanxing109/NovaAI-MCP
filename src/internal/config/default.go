@@ -22,26 +22,16 @@ func Default() *Config {
 			StateDir:      stateDir,
 			WorkDir:       "/storage/emulated/0/novaaiAI",
 			WorkspaceRoot: filepath.Join(stateDir, "workspace"),
-			DownloadsDir:  filepath.Join(stateDir, "downloads"),
-			UploadsDir:    filepath.Join(stateDir, "uploads"),
-			ArtifactsDir:  filepath.Join(stateDir, "artifacts"),
-			TempDir:       filepath.Join(stateDir, "tmp"),
 			AuditDir:      filepath.Join(stateDir, "audit"),
-			CrashDir:      filepath.Join(stateDir, "crash"),
 		},
 		Limits: Limits{
-			MaxConnections:     128,
-			MaxRequestBytes:    67108864,
-			TotalTasks:         16,
-			HeavyTasks:         2,
-			ShellTimeoutSec:    60,
-			TransferChunkBytes: 1048576,
-			TransferMaxBytes:   1073741824,
-			ResultPreviewBytes: 262144,
-			ArtifactTTLSec:     604800,
+			MaxRequestBytes: 67108864,
+			// shell/script 未显式给 timeoutMs 时的默认超时。
+			ShellTimeoutSec: 60,
+			// 单个工具结果的字节上限。超过就截断 Content 并丢弃
+			// structuredContent —— 否则一个 dumpsys 就能撑爆 JSON-RPC 帧。
+			ResultPreviewBytes: 1048576,
 			ShutdownGraceSec:   30,
-			UploadIdleTTLSec:   1800,
-			DownloadRetries:    3,
 		},
 		Security: Security{
 			Anonymous:      false,
@@ -58,7 +48,6 @@ func Default() *Config {
 				Enabled:        true,
 				Path:           filepath.Join(stateDir, "mcp.sock"),
 				Mode:           "0660",
-				Group:          "shell",
 				SepolicyInject: true,
 			},
 			LAN: LANConf{
@@ -78,18 +67,14 @@ func Default() *Config {
 			RetentionDays:   30,
 			IncludeArgs:     true,
 			ArgPreviewBytes: 256,
-			RedactMode:      "allowlist",
 			AllowlistFields: []string{"action", "path", "package", "name",
 				"query", "url", "tool", "pattern", "cmd", "command"},
-			SeparateArgsFile: true,
 		},
 		RateLimit: RateLimitConfig{
 			Global: RateBucket{QPS: 50, Burst: 100},
 			PerSession: SessionRateLimit{
 				QPS: 20, Burst: 40,
 				MaxConcurrentTools: 5,
-				TotalUploadBytes:   5368709120,
-				TotalDownloadBytes: 5368709120,
 			},
 			PerTool: map[string]RateBucket{
 				"novaai_log":     {QPS: 2, Burst: 4},
@@ -102,17 +87,12 @@ func Default() *Config {
 			MaxSessions:          32,
 			SweepIntervalSeconds: 300,
 		},
-		Skill: SkillConfig{
-			LearnFromRiskOps: false,
-			MaxLearnedSkills: 200,
-		},
 		Uninstall: UninstallConfig{
 			PurgeInternalState: false,
 			PurgeAuditLogs:     false,
 			PurgeCrashDumps:    false,
 			PurgeUserData:      false,
 		},
-		Capabilities: map[string]bool{},
 	}
 }
 

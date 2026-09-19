@@ -6,13 +6,14 @@ ZCR_MODDIR="$MODDIR"
 
 zcr_prepare_internal >/dev/null 2>&1 || true
 
-zcr_print "NovaAI-MCP v0.05"
+zcr_print "NovaAI-MCP v$(zcr_module_version)"
 zcr_print "模块目录: $ZCR_MODDIR"
 zcr_print ""
 
 # 状态
+# zcr_read_pid 已校验进程身份，非空即代表 daemon 活着
 pid="$(zcr_read_pid 2>/dev/null)"
-if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+if [ -n "$pid" ]; then
   zcr_print "服务状态: 运行中 (pid=$pid)"
 else
   zcr_print "服务状态: 未运行"
@@ -43,8 +44,10 @@ fi
 # 配置文件
 if [ -f "$ZCR_CONFIG" ]; then
   zcr_print "配置文件: $ZCR_CONFIG"
-  lan_enabled="$(grep -o '"enabled"[[:space:]]*:[[:space:]]*true' "$ZCR_CONFIG" | head -1 || echo '未知')"
-  zcr_print "配置摘要: $lan_enabled"
+  # 注意：这里只取 config.json 里第一个 "enabled": true，它未必是 LAN 开关
+  # （audit / token 等同名字段会先出现）。所以标签如实写成"首个 enabled"。
+  first_enabled="$(grep -o '"enabled"[[:space:]]*:[[:space:]]*true' "$ZCR_CONFIG" | head -1 || echo '未知')"
+  zcr_print "配置摘要（首个 enabled=true）: ${first_enabled:-未知}"
 fi
 
 # 最近的审计
@@ -57,6 +60,6 @@ if [ -d "$ZCR_INTERNAL_DIR/audit" ]; then
 fi
 
 zcr_print ""
-zcr_print "提示：WebUI 中点击此按钮仅显示摘要，完整控制请使用 MCP 客户端"
+zcr_print "提示：本按钮仅显示摘要，完整控制请使用 MCP 客户端"
 
 exit 0

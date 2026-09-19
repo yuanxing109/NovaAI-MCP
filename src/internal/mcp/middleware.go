@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -33,6 +35,9 @@ type ctxKey string
 // ctxProfileKey 承载"本次请求鉴权后解析出的 profile 名"。
 const ctxProfileKey ctxKey = "novaai.profile"
 
+// ctxRateKeyKey 承载"本次请求的限流身份键"。
+const ctxRateKeyKey ctxKey = "novaai.ratekey"
+
 // profileFromContext 取出鉴权阶段解析出的 profile 名。
 func profileFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxProfileKey).(string); ok && v != "" {
@@ -41,20 +46,41 @@ func profileFromContext(ctx context.Context) string {
 	return "default"
 }
 
-// withProfile 把本次请求对应的 profile 名放进 context。
+// rateKeyFromContext 取出限流身份键。缺失时退化为本地身份，不会放行成"无限额"。
+func rateKeyFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxRateKeyKey).(string); ok && v != "" {
+		return v
+	}
+	return localRateKey
+}
+
+// localRateKey 是 unix socket 与匿名 loopback 共用的限流身份。
+//
+// 这两类入口都没有 token，但都已经是"本机特权入口"（unix socket 仅 root
+// 可连，匿名 loopback 需要显式打开 security.anonymous），共用一个桶是合理的。
+const localRateKey = "local"
+
+// withIdentity 把本次请求对应的 profile 名与限流身份键放进 context。
 //
 // token 为空（unix socket / 匿名 loopback）时按 sessionBinding.fallback 解析，
 // 这样无 token 入口也有确定的、可配置的权限归属，而不是隐式全权。
-func withProfile(r *http.Request, mc *MiddlewareConfig, token string) *http.Request {
+//
+// 限流键取 token 哈希而不是 Mcp-Session-Id：后者是客户端自报的请求头，
+// 换一个就能拿到全新的满额桶。
+func withIdentity(r *http.Request, mc *MiddlewareConfig, token string) *http.Request {
 	name := "default"
+	rateKey := localRateKey
 	if mc.Profiles != nil {
 		hash := ""
 		if token != "" {
 			hash = auth.HashToken(token)
+			rateKey = "tok:" + hash
 		}
 		name = mc.Profiles.ResolveByTokenHash(hash)
 	}
-	return r.WithContext(context.WithValue(r.Context(), ctxProfileKey, name))
+	ctx := context.WithValue(r.Context(), ctxProfileKey, name)
+	ctx = context.WithValue(ctx, ctxRateKeyKey, rateKey)
+	return r.WithContext(ctx)
 }
 
 func peerInfo(r *http.Request) (kind string, ip string) {
@@ -86,44 +112,20 @@ func BuildMiddlewareChain(server *Server, mc *MiddlewareConfig) http.Handler {
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(r.Body, mc.Config.Limits.MaxRequestBytes))
+		// 用 MaxBytesReader 而不是 io.LimitReader：后者静默截断，
+		// 超限会伪装成 JSON 解析失败（-32700），把客户端引向"JSON 写错了"
+		// 这个错误方向。MaxBytesReader 会返回可识别的 *http.MaxBytesError。
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mc.Config.Limits.MaxRequestBytes))
 		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				writeJSONRPCError(w, nil, -32600,
+					fmt.Sprintf("请求体超过上限 %d 字节", mbe.Limit), nil)
+				return
+			}
 			writeJSONRPCError(w, nil, -32700, "请求体读取失败", nil)
 			return
 		}
-
-		sessionID := r.Header.Get("Mcp-Session-Id")
-		profName := profileFromContext(r.Context())
-
-		// 会话：不存在或已过期就新建，并把新 ID 回给客户端
-		var sess *session.State
-		if sessionID != "" {
-			if s, err := mc.Sessions.Get(sessionID); err == nil {
-				sess = s
-				mc.Sessions.Touch(sessionID)
-				// profile 跟随本次鉴权结果，不继承上一次（防权限混淆）
-				mc.Sessions.SetProfile(sess.ID, profName)
-			}
-		}
-		if sess == nil {
-			newSess, err := mc.Sessions.Create(profName, -1)
-			if err != nil {
-				writeJSONRPCError(w, nil, -32014, "会话创建失败", nil)
-				return
-			}
-			sess = newSess
-			// 新会话建立时顺手回收限流器里已失效会话的桶。
-			// 限流器的 perSession/perTool 表是按会话 ID 惰性增长的，
-			// 会话本身会被 sweep 清理，但限流表不会，长期运行会持续膨胀。
-			if mc.RateLimit != nil {
-				active := make(map[string]bool)
-				for _, st := range mc.Sessions.List() {
-					active[st.ID] = true
-				}
-				mc.RateLimit.Sweep(active)
-			}
-		}
-		w.Header().Set("Mcp-Session-Id", sess.ID)
 
 		trimmed := bytes.TrimSpace(body)
 		if len(trimmed) == 0 {
@@ -131,20 +133,69 @@ func BuildMiddlewareChain(server *Server, mc *MiddlewareConfig) http.Handler {
 			return
 		}
 
-		// ---- JSON-RPC 批量请求 ----
-		if trimmed[0] == '[' {
-			var batch []JSONRPCRequest
-			if err := json.Unmarshal(trimmed, &batch); err != nil {
+		// 先解析再决定会话：要不要登记会话取决于方法名（见下）。
+		batched := trimmed[0] == '['
+		var reqs []JSONRPCRequest
+		if batched {
+			if err := json.Unmarshal(trimmed, &reqs); err != nil {
 				writeJSONRPCError(w, nil, -32700, "JSON 解析失败", nil)
 				return
 			}
-			if len(batch) == 0 {
+			if len(reqs) == 0 {
 				writeJSONRPCError(w, nil, -32600, "空的批量请求", nil)
 				return
 			}
-			out := make([]*JSONRPCResponse, 0, len(batch))
-			for i := range batch {
-				if resp := server.Handle(&batch[i], sess.ID); resp != nil {
+		} else {
+			var one JSONRPCRequest
+			if err := json.Unmarshal(trimmed, &one); err != nil {
+				writeJSONRPCError(w, nil, -32700, "JSON 解析失败", nil)
+				return
+			}
+			reqs = []JSONRPCRequest{one}
+		}
+
+		profName := profileFromContext(r.Context())
+		rateKey := rateKeyFromContext(r.Context())
+
+		// ---- 会话登记 ----
+		//
+		// 只有两种情况占用会话名额：
+		//   1. 客户端带了有效的 Mcp-Session-Id；
+		//   2. 本次请求包含 initialize。
+		// 其余走无状态路径（sessionID 为空，不登记）。这是必要的：
+		// 不实现会话的客户端如果每个请求都新建会话，会在 MaxSessions
+		// 处撞墙并持续收到 -32014，直到空闲超时把它们清掉。
+		sessionID := ""
+		if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+			if _, err := mc.Sessions.Get(sid); err == nil {
+				sessionID = sid
+				mc.Sessions.Touch(sid)
+				// profile 跟随本次鉴权结果，不继承上一次（防权限混淆）
+				mc.Sessions.SetProfile(sid, profName)
+			}
+		}
+		if sessionID == "" && containsInitialize(reqs) {
+			sess, err := mc.Sessions.Create(profName)
+			if err != nil {
+				writeJSONRPCError(w, nil, -32014, "会话创建失败", nil)
+				return
+			}
+			sessionID = sess.ID
+		}
+		if sessionID != "" {
+			w.Header().Set("Mcp-Session-Id", sessionID)
+		}
+
+		ident := Identity{
+			SessionID: sessionID,
+			Profile:   profName,
+			RateKey:   rateKey,
+		}
+
+		if batched {
+			out := make([]*JSONRPCResponse, 0, len(reqs))
+			for i := range reqs {
+				if resp := server.Handle(&reqs[i], ident); resp != nil {
 					out = append(out, resp)
 				}
 			}
@@ -157,13 +208,7 @@ func BuildMiddlewareChain(server *Server, mc *MiddlewareConfig) http.Handler {
 			return
 		}
 
-		var req JSONRPCRequest
-		if err := json.Unmarshal(trimmed, &req); err != nil {
-			writeJSONRPCError(w, nil, -32700, "JSON 解析失败", nil)
-			return
-		}
-
-		resp := server.Handle(&req, sess.ID)
+		resp := server.Handle(&reqs[0], ident)
 		if resp == nil {
 			writeNoContent(w)
 			return
@@ -174,9 +219,33 @@ func BuildMiddlewareChain(server *Server, mc *MiddlewareConfig) http.Handler {
 	return authMiddleware(mc, lanMiddleware(mc, hostMiddleware(mc, handler)))
 }
 
+// containsInitialize 判断一批请求里是否包含 initialize。
+// 只要有一个，本次就要登记会话（批量里通常只有一个 initialize）。
+func containsInitialize(reqs []JSONRPCRequest) bool {
+	for i := range reqs {
+		if reqs[i].Method == "initialize" {
+			return true
+		}
+	}
+	return false
+}
+
+// writeJSON 先序列化再写响应。
+//
+// 顺序是关键：一旦开始写响应体，200 状态码就已经发出去了，此时再发现
+// 序列化失败，客户端只会收到一个空响应体。novaai_session_list 曾经就是
+// 这样坏的 —— State 里有个 func 字段，encoding/json 对它必然失败，
+// 而错误被丢弃，于是工具返回 "HTTP 200 + 0 字节"。
+// 先 Marshal 就能在写头之前把失败转成正常的 JSON-RPC 错误。
 func writeJSON(w http.ResponseWriter, v any) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		writeJSONRPCError(w, nil, -32603, "响应序列化失败: "+err.Error(), nil)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n"))
 }
 
 // writeNoContent 用于通知类请求：规范要求没有响应体。
@@ -309,7 +378,7 @@ func authMiddleware(mc *MiddlewareConfig, next http.Handler) http.Handler {
 
 		// unix socket 文件权限即鉴权（默认 0660 且未 chgrp，仅 root 可连）
 		if kind == "unix" {
-			next.ServeHTTP(w, withProfile(r, mc, ""))
+			next.ServeHTTP(w, withIdentity(r, mc, ""))
 			return
 		}
 
@@ -319,7 +388,7 @@ func authMiddleware(mc *MiddlewareConfig, next http.Handler) http.Handler {
 		// loopback 在 anonymous=true 时免 token；默认 false，即本机也要 token。
 		// 这是必要的：设备上任何 App 都能访问 127.0.0.1，而本服务有 root 能力。
 		if isLoopback && mc.Config.Security.Anonymous {
-			next.ServeHTTP(w, withProfile(r, mc, ""))
+			next.ServeHTTP(w, withIdentity(r, mc, ""))
 			return
 		}
 
@@ -346,7 +415,7 @@ func authMiddleware(mc *MiddlewareConfig, next http.Handler) http.Handler {
 			writeJSONRPCError(w, nil, -32001, "鉴权失败", nil)
 			return
 		}
-		next.ServeHTTP(w, withProfile(r, mc, token))
+		next.ServeHTTP(w, withIdentity(r, mc, token))
 	})
 }
 

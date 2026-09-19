@@ -9,14 +9,14 @@
 
 - *通用载体*：`novaai_fs_write`、`novaai_fs_manage`、`novaai_archive`、
   `novaai_download`、`novaai_transfer_upload`、`novaai_transfer_export`、
-  `novaai_shell`、`novaai_script`、`novaai_backup`(restore)、
-  `novaai_skill`(forget)、`novaai_diagnostics`、`novaai_config`(export)。
+  `novaai_shell`、`novaai_script`、`novaai_schedule`、`novaai_backup`(restore)、
+  `novaai_diagnostics`、`novaai_config`(export)。
   它们能到达任意路径，所以必须过 `internal/pathguard` 判定。
 - *专用 owner*：`novaai_config` 拥有 `config.json`，`novaai_root_module` 与
   `novaai_hook_*` 拥有 `/data/adb/modules`，`novaai_systemless` 拥有
   systemless 覆盖。它们就是这些位置的合法管理者，因此**不**过判定。
   对它们的使用由 `profiles` 控制（`default` 拒绝 `novaai_config`、
-  `novaai_root_module`、`novaai_systemless`）。
+  `novaai_root_module`、`novaai_systemless`、`novaai_schedule`）。
 
 这样划分的理由：如果 owner 也被拦住，工具就失去意义；如果载体不被拦，
 一个 `fs_write` 就能绕过所有工具级设计。
@@ -100,11 +100,13 @@
 
 ## 默认 profile 不含 shell
 
-`default` 的 `denyTools` 包含 `novaai_shell` 与 `novaai_script`。
+`default` 的 `denyTools` 包含 `novaai_shell`、`novaai_script` 与 `novaai_schedule`。
 
 原因：只要通用 shell 可达，上面所有判定都只是建议——`reboot recovery`、
 `rm -fr /data`、`echo x > /dev/block/by-name/boot` 都能绕过工具层设计。
-62 个结构化工具已覆盖绝大多数场景。
+`novaai_schedule` 属同类载体：`create` 写脚本、`run` 用 `sh` 执行，
+效果与 `novaai_shell` 等价，所以必须一起挡。
+61 个结构化工具已覆盖绝大多数场景。
 
 需要时把 token 绑到 `agent_full`：
 

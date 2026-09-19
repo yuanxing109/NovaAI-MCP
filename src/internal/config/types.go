@@ -11,9 +11,7 @@ type Config struct {
 	Audit          AuditConfig        `json:"audit"`
 	RateLimit      RateLimitConfig    `json:"rateLimit"`
 	Session        SessionConfig      `json:"session"`
-	Skill          SkillConfig        `json:"skill"`
 	Uninstall      UninstallConfig    `json:"uninstall"`
-	Capabilities   map[string]bool    `json:"capabilities"`
 }
 
 type Network struct {
@@ -23,31 +21,27 @@ type Network struct {
 	AllowedOrigins []string `json:"allowedOrigins"`
 }
 
+// Paths 只保留真正被读取的目录。
+//
+// 子目录（downloads/uploads/artifacts/tmp）不再单独配置：stateDir 就是那个
+// 旋钮，四个可覆盖的子目录只会和 pathguard 的角色白名单产生同步负担。
+//
+// crashDir 同样已移除，但理由是硬的：崩溃处理器必须在配置加载**之前**就
+// 装好（见 main.go 的顺序），否则配置解析阶段自身的 panic 没有兜底。
+// 一个只能在配置就绪后才可能生效的字段等于没有这个字段，所以崩溃目录固定
+// 为 {stateDir}/crash。
 type Paths struct {
 	StateDir      string `json:"stateDir"`
 	WorkDir       string `json:"workDir"`
 	WorkspaceRoot string `json:"workspaceRoot"`
-	DownloadsDir  string `json:"downloadsDir"`
-	UploadsDir    string `json:"uploadsDir"`
-	ArtifactsDir  string `json:"artifactsDir"`
-	TempDir       string `json:"tempDir"`
 	AuditDir      string `json:"auditDir"`
-	CrashDir      string `json:"crashDir"`
 }
 
 type Limits struct {
-	MaxConnections     int   `json:"maxConnections"`
 	MaxRequestBytes    int64 `json:"maxRequestBytes"`
-	TotalTasks         int   `json:"totalTasks"`
-	HeavyTasks         int   `json:"heavyTasks"`
 	ShellTimeoutSec    int   `json:"shellTimeoutSeconds"`
-	TransferChunkBytes int64 `json:"transferChunkBytes"`
-	TransferMaxBytes   int64 `json:"transferMaxBytes"`
 	ResultPreviewBytes int64 `json:"resultPreviewBytes"`
-	ArtifactTTLSec     int   `json:"artifactTtlSeconds"`
 	ShutdownGraceSec   int   `json:"shutdownGraceSeconds"`
-	UploadIdleTTLSec   int   `json:"uploadIdleTtlSeconds"`
-	DownloadRetries    int   `json:"downloadRetryAttempts"`
 }
 
 type Security struct {
@@ -71,7 +65,6 @@ type UnixSocket struct {
 	Enabled        bool   `json:"enabled"`
 	Path           string `json:"path"`
 	Mode           string `json:"mode"`
-	Group          string `json:"group"`
 	SepolicyInject bool   `json:"sepolicyInject"`
 }
 
@@ -91,16 +84,18 @@ type SessionBinding struct {
 	Fallback    string            `json:"fallback"`
 }
 
+// AuditConfig 只保留已实现的行为。
+//
+// redactMode 已移除：只有 allowlist 一种脱敏实现，保留 none/all 这类
+// 未实现的枚举只会让人以为关掉脱敏是可行的。
 type AuditConfig struct {
-	Enabled          bool     `json:"enabled"`
-	MaxFileBytes     int64    `json:"maxFileBytes"`
-	MaxFiles         int      `json:"maxFiles"`
-	RetentionDays    int      `json:"retentionDays"`
-	IncludeArgs      bool     `json:"includeArgs"`
-	ArgPreviewBytes  int      `json:"argPreviewBytes"`
-	RedactMode       string   `json:"redactMode"`
-	AllowlistFields  []string `json:"allowlistFields"`
-	SeparateArgsFile bool     `json:"separateArgsFile"`
+	Enabled         bool     `json:"enabled"`
+	MaxFileBytes    int64    `json:"maxFileBytes"`
+	MaxFiles        int      `json:"maxFiles"`
+	RetentionDays   int      `json:"retentionDays"`
+	IncludeArgs     bool     `json:"includeArgs"`
+	ArgPreviewBytes int      `json:"argPreviewBytes"`
+	AllowlistFields []string `json:"allowlistFields"`
 }
 
 type RateLimitConfig struct {
@@ -114,23 +109,18 @@ type RateBucket struct {
 	Burst float64 `json:"burst"`
 }
 
+// SessionRateLimit 的第二层桶按**客户端身份**（token 哈希）而不是
+// Mcp-Session-Id 计数，见 internal/ratelimit 的包注释。
 type SessionRateLimit struct {
 	QPS                float64 `json:"qps"`
 	Burst              float64 `json:"burst"`
 	MaxConcurrentTools int     `json:"maxConcurrentTools"`
-	TotalUploadBytes   int64   `json:"totalUploadBytes"`
-	TotalDownloadBytes int64   `json:"totalDownloadBytes"`
 }
 
 type SessionConfig struct {
 	IdleTimeoutSeconds   int `json:"idleTimeoutSeconds"`
 	MaxSessions          int `json:"maxSessions"`
 	SweepIntervalSeconds int `json:"sweepIntervalSeconds"`
-}
-
-type SkillConfig struct {
-	LearnFromRiskOps bool `json:"learnFromRiskOps"`
-	MaxLearnedSkills int  `json:"maxLearnedSkills"`
 }
 
 type UninstallConfig struct {

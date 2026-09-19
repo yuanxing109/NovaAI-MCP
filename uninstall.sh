@@ -4,12 +4,9 @@ MODDIR=${0%/*}
 ZCR_MODDIR="$MODDIR"
 . "$MODDIR/common.sh"
 
-# 只需要内部目录（写停止标志、日志、PID）；不要创建用户目录——
+# 只需要内部目录（写日志、读 PID）；不要创建用户目录——
 # zcr_prepare_internal 会 mkdir 用户目录，卸载时不应该触碰用户数据。
 mkdir -p "$ZCR_INTERNAL_DIR" 2>/dev/null
-
-# 写入手动停止标志
-touch "$ZCR_INTERNAL_DIR/manual-stop" 2>/dev/null
 
 # 停止 supervisor
 zcr_stop_supervisor

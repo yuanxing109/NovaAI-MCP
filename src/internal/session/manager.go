@@ -17,18 +17,21 @@ var (
 	ErrSessionExpired  = errors.New("会话已过期")
 )
 
+// State 是一个已登记的 MCP 会话。
+//
+// 字段必须全部可 JSON 序列化：session_list 直接把它编码给客户端。
+// 不要在这里放 func / chan —— encoding/json 遇到它们会整体失败，
+// 而调用方是"先写 200 再编码"，失败时客户端只会收到一个空响应体。
+//
+// Profile 是"最近一次请求解析出的 profile"的**观测记录**，供 session_list
+// 展示；它不是鉴权依据。同一个 Mcp-Session-Id 可能被不同 token 复用，
+// 因此权限始终取本次请求的 token 解析结果（mcp.Identity.Profile）。
 type State struct {
-	ID         string
-	Profile    string
-	PeerUID    int
-	CreatedAt  time.Time
-	LastSeenAt time.Time
-	Closed     bool
-	CloseFn    func()
-
-	UploadBytes   int64
-	DownloadBytes int64
-	Concurrency   int
+	ID         string    `json:"id"`
+	Profile    string    `json:"profile"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
+	Closed     bool      `json:"closed"`
 }
 
 type Manager struct {
@@ -51,7 +54,12 @@ func NewManager(cfg *config.Config, auditLogger *audit.Logger) *Manager {
 	return m
 }
 
-func (m *Manager) Create(profile string, peerUID int) (*State, error) {
+// Create 登记一个新会话。
+//
+// 只应在处理 initialize 时调用。其余请求若没有携带有效的 Mcp-Session-Id，
+// 一律走无状态路径（不登记），否则不实现会话的客户端每发一个请求就会
+// 占用一个名额，很快撞上 MaxSessions 并被 -32014 拒绝。
+func (m *Manager) Create(profile string) (*State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -63,7 +71,6 @@ func (m *Manager) Create(profile string, peerUID int) (*State, error) {
 	s := &State{
 		ID:         id,
 		Profile:    profile,
-		PeerUID:    peerUID,
 		CreatedAt:  time.Now(),
 		LastSeenAt: time.Now(),
 	}
@@ -99,11 +106,11 @@ func (m *Manager) Touch(id string) {
 	m.mu.Unlock()
 }
 
-// SetProfile 把会话重新绑定到本次请求鉴权后解析出的 profile。
+// SetProfile 记录"本次请求把这个会话绑定到了哪个 profile"，仅供观测。
 //
-// 必须做这件事：Mcp-Session-Id 由客户端自行携带，同一个 id 可能被不同 token
-// 复用。如果只在创建时绑定 profile，低权限 token 就能复用高权限 token 建立的
-// 会话，形成权限混淆。profile 必须始终跟随"本次请求的 token"。
+// 鉴权不读这个值：Mcp-Session-Id 由客户端自行携带，同一个 id 可能被不同
+// token 复用，所以权限必须每次请求重新按 token 解析。这里写入只是让
+// session_list 能显示会话当前的归属。
 func (m *Manager) SetProfile(id, profile string) {
 	if profile == "" {
 		return
@@ -123,9 +130,6 @@ func (m *Manager) Close(id string) {
 		s.Closed = true
 	}
 	m.mu.Unlock()
-	if ok && s.CloseFn != nil {
-		s.CloseFn()
-	}
 	m.audit.Log(audit.Entry{Event: "session_close", Session: id})
 }
 
@@ -149,14 +153,6 @@ func (m *Manager) List() []State {
 		out = append(out, *s)
 	}
 	return out
-}
-
-func (m *Manager) RevokeAll() int {
-	m.mu.Lock()
-	count := len(m.sessions)
-	m.mu.Unlock()
-	m.CloseAll()
-	return count
 }
 
 // Stop 停止后台清扫 goroutine。可重复调用。
@@ -199,34 +195,6 @@ func (m *Manager) sweep() {
 		m.audit.Log(audit.Entry{Event: "session_idle_expire", Session: id})
 		m.Close(id)
 	}
-}
-
-func (m *Manager) AddUpload(id string, n int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s, ok := m.sessions[id]
-	if !ok {
-		return ErrSessionNotFound
-	}
-	if s.UploadBytes+n > m.cfg.RateLimit.PerSession.TotalUploadBytes {
-		return errors.New("会话上传配额超限")
-	}
-	s.UploadBytes += n
-	return nil
-}
-
-func (m *Manager) AddDownload(id string, n int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s, ok := m.sessions[id]
-	if !ok {
-		return ErrSessionNotFound
-	}
-	if s.DownloadBytes+n > m.cfg.RateLimit.PerSession.TotalDownloadBytes {
-		return errors.New("会话下载配额超限")
-	}
-	s.DownloadBytes += n
-	return nil
 }
 
 func randomID() (string, error) {

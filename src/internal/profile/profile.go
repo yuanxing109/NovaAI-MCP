@@ -41,13 +41,6 @@ func (s *Store) ResolveByTokenHash(hash string) string {
 	return "default"
 }
 
-func (s *Store) Update(cfg *config.Config) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.profiles = cfg.Profiles
-	s.binding = cfg.SessionBinding
-}
-
 // Allows 检查 profile 是否允许调用指定工具
 func Allows(p *config.Profile, tool string, risk int) bool {
 	if risk > p.RiskCeiling {

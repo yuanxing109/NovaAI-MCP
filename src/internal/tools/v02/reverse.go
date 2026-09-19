@@ -23,6 +23,26 @@ const (
 // Termux 环境变量前缀
 const termuxEnvPrefix = `PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=$PREFIX/bin:$PREFIX/bin/applets LD_LIBRARY_PATH=$PREFIX/lib`
 
+// apktoolJarPath 返回随模块分发的 apktool.jar 的绝对路径。
+//
+// jar 与 daemon 二进制同在模块内：<mod>/bin/<abi>/novaaimcpd 与
+// <mod>/bin/tools/*.jar；wrapper 脚本（bin/wrappers/apktool）读的也是这一份。
+// 路径从可执行文件位置推导，避免在 Go 里再写死一遍模块 ID。
+//
+// 旧实现读状态目录 /data/adb/novaai-mcp/tools/apktool.jar —— 那是安装时复制
+// 出来的第二份副本，同一批 jar 在设备上存两遍（约 31 MiB）且可能版本漂移。
+// 见 docs/KNOWN_ISSUES.md。
+func apktoolJarPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		// 不设回退路径：os.Executable 在 Linux/Android 上读 /proc/self/exe，
+		// 失败属异常情况。返回相对名会让 java 报出明确的
+		// "unable to access jarfile"，好过静默读到一份陈旧副本。
+		return "apktool.jar"
+	}
+	return filepath.Join(filepath.Dir(filepath.Dir(exe)), "tools", "apktool.jar")
+}
+
 // ensureDirs 确保目录存在
 func ensureDirs() {
 	for _, dir := range []string{apksDir, decompiledDir, dexDir, stringsDir, hooksDir} {
@@ -84,7 +104,7 @@ func registerReverseTools(reg RegisterFn, deps *Deps) {
 				var cmd string
 				switch tool {
 				case "apktool":
-					cmd = fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar /data/adb/novaai-mcp/tools/apktool.jar d -s -f -o %s %s", termuxEnvPrefix, shQuote(output), shQuote(apkPath))
+					cmd = fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar %s d -s -f -o %s %s", termuxEnvPrefix, shQuote(apktoolJarPath()), shQuote(output), shQuote(apkPath))
 				case "jadx":
 					cmd = fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar /data/data/com.termux/files/usr/share/java/jadx-1.5.5-all.jar -d %s %s", termuxEnvPrefix, shQuote(output), shQuote(apkPath))
 				default:
@@ -177,14 +197,14 @@ func registerReverseTools(reg RegisterFn, deps *Deps) {
 			switch in.Action {
 			case "disassemble":
 				_ = os.MkdirAll(output, 0755)
-				out, stderr, code, err := runSh(ctx, deps, "novaai_reverse_smali", fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar /data/adb/novaai-mcp/tools/apktool.jar d -f -o %s %s", termuxEnvPrefix, shQuote(output), shQuote(in.Path)), 2*time.Minute)
+				out, stderr, code, err := runSh(ctx, deps, "novaai_reverse_smali", fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar %s d -f -o %s %s", termuxEnvPrefix, shQuote(apktoolJarPath()), shQuote(output), shQuote(in.Path)), 2*time.Minute)
 				if err != nil || code != 0 {
 					return errFail("DISASM_FAILED", stderr), nil
 				}
 				return ok(map[string]any{"output": output, "log": out}), nil
 			case "assemble":
 				dexPath := filepath.Join(output, "classes.dex")
-				out, stderr, code, err := runSh(ctx, deps, "novaai_reverse_smali", fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar /data/adb/novaai-mcp/tools/apktool.jar b -f -o %s %s", termuxEnvPrefix, shQuote(dexPath), shQuote(in.Path)), 2*time.Minute)
+				out, stderr, code, err := runSh(ctx, deps, "novaai_reverse_smali", fmt.Sprintf("%s /data/data/com.termux/files/usr/bin/java -jar %s b -f -o %s %s", termuxEnvPrefix, shQuote(apktoolJarPath()), shQuote(dexPath), shQuote(in.Path)), 2*time.Minute)
 				if err != nil || code != 0 {
 					return errFail("ASM_FAILED", stderr), nil
 				}

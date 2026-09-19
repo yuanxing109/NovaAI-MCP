@@ -156,9 +156,9 @@ func registerSysTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- property ----
-	reg("novaai_property", "系统属性", "读取、列出、设置或恢复 Android 属性",
+	reg("novaai_property", "系统属性", "读取、列出或设置 Android 属性",
 		objSchema(map[string]any{
-			"action": enumProp("操作", "get", "list", "set", "reset"),
+			"action": enumProp("操作", "get", "list", "set"),
 			"key":    strProp("属性名"),
 			"value":  strProp("属性值"),
 		}, "action"),
@@ -189,8 +189,6 @@ func registerSysTools(reg RegisterFn, deps *Deps) {
 					return errFail("SETPROP_FAILED", errOut), nil
 				}
 				return okMsg("已设置"), nil
-			case "reset":
-				return errFail("NOT_IMPLEMENTED", "reset 需重启恢复"), nil
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})

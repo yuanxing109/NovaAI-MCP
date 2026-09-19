@@ -10,9 +10,14 @@ import (
 
 func registerNetLogTools(reg RegisterFn, deps *Deps) {
 	// ---- network ----
-	reg("novaai_network", "网络操作", "网络诊断、持久 HTTP/Cookie、HTML/浏览器捕获、RSS/Atom 与 WebSocket",
+	//
+	// 描述必须与实际 action 一致。早期版本声称支持"持久 HTTP/Cookie、
+	// HTML/浏览器捕获、RSS/Atom 与 WebSocket"，但一个都没有实现，
+	// 而且 action 用的是自由字符串，客户端连有哪些操作都看不到。
+	reg("novaai_network", "网络操作", "网络诊断：接口、路由、DNS、连通性、端口、连接、Wi-Fi、代理与 HTTP 请求",
 		objSchema(map[string]any{
-			"action":           strProp("操作"),
+			"action": enumProp("操作", "interfaces", "routes", "dns", "ping", "resolve",
+				"http", "ports", "connections", "wifi", "proxy", "connectivity"),
 			"url":              strProp("URL"),
 			"method":           strProp("HTTP 方法"),
 			"headers":          map[string]any{"type": "object"},
@@ -110,27 +115,22 @@ func registerNetLogTools(reg RegisterFn, deps *Deps) {
 					"dumpsys connectivity | head -50", 15*time.Second)
 				return ok(map[string]any{"raw": out}), nil
 			}
-			return errFail("NOT_IMPLEMENTED", in.Action), nil
+			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
 
 	// ---- log ----
-	reg("novaai_log", "日志", "读取 Logcat、内核、dmesg、模块/MCP 日志或实时流",
+	reg("novaai_log", "日志", "读取 Logcat、内核、dmesg、模块/MCP 日志或日志快照",
 		objSchema(map[string]any{
-			"action":     enumProp("操作", "logcat", "kernel", "dmesg", "module", "mcp", "stream", "clear"),
-			"lines":      intProp("行数"),
-			"follow":     boolProp("持续读取"),
-			"timeoutMs":  intProp("超时毫秒"),
-			"path":       strProp("文件路径"),
-			"target":     strProp("目标"),
-			"background": boolProp("后台"),
+			"action":    enumProp("操作", "logcat", "kernel", "dmesg", "module", "mcp", "stream", "clear"),
+			"lines":     intProp("行数"),
+			"timeoutMs": intProp("超时毫秒"),
+			"target":    strProp("目标"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
 				Action    string `json:"action"`
 				Lines     int    `json:"lines"`
-				Follow    bool   `json:"follow"`
 				TimeoutMs int    `json:"timeoutMs"`
-				Path      string `json:"path"`
 				Target    string `json:"target"`
 			}
 			_ = json.Unmarshal(args, &in)
@@ -166,9 +166,9 @@ func registerNetLogTools(reg RegisterFn, deps *Deps) {
 					fmt.Sprintf("tail -n %d %s/novaaimcpd.log", in.Lines, shQuote(deps.StateDir)), 10*time.Second)
 				return ok(map[string]any{"raw": out}), nil
 			case "stream":
-				if in.Follow {
-					return errFail("NEED_BACKGROUND", "follow 模式需 background: true"), nil
-				}
+				// 一次性读取最近 N 行。持续跟随（follow）需要后台执行能力，
+				// 本服务没有实现，因此 schema 不再暴露该参数 —— 一个恒定
+				// 返回 NOT_IMPLEMENTED 的参数是骗人的契约。
 				out, _, _, _ := runSh(ctx, deps, "novaai_log",
 					fmt.Sprintf("logcat -t %d", in.Lines),
 					time.Duration(in.TimeoutMs)*time.Millisecond)

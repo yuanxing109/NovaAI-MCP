@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"github.com/novaai/novaai-mcp/internal/adapter"
@@ -34,7 +35,16 @@ const (
 	defaultStateDir   = "/data/adb/novaai-mcp"
 	defaultConfigFile = "config.json"
 	defaultTokenFile  = "token"
+	pidFileName       = "novaaimcpd.pid"
 )
+
+// writePIDFile 把当前进程 PID 写入 path。
+//
+// 权限 0600：状态目录本身是 0700，但 PID 文件在 shell 侧（root）与
+// 可能的其他本地调用方之间共享，收紧权限没有坏处。
+func writePIDFile(path string) error {
+	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0600)
+}
 
 func main() {
 	stateDir := flag.String("state", defaultStateDir, "state directory")
@@ -58,6 +68,20 @@ func main() {
 	if err := prepareStateDir(*stateDir); err != nil {
 		log.Fatalf("准备状态目录失败: %v", err)
 	}
+
+	// PID 文件由 daemon 自己写（唯一 owner），shell 侧只读。
+	//
+	// 旧实现由 shell 写 `$!`，那是 `su` 进程的 PID；而 daemon 是 su 的孙进程，
+	// `kill -TERM` 因此可能到不了 daemon，卸载后它仍占着端口与 socket。
+	// 见 docs/KNOWN_ISSUES.md。
+	//
+	// 被 SIGKILL 或 log.Fatalf 时会残留本文件；shell 侧 zcr_is_daemon 会按
+	// /proc/<pid>/comm 校验身份，残留文件不会误杀复用了该 PID 的进程。
+	pidPath := filepath.Join(*stateDir, pidFileName)
+	if err := writePIDFile(pidPath); err != nil {
+		log.Printf("写 PID 文件失败（不影响启动）: %v", err)
+	}
+	defer os.Remove(pidPath)
 
 	// 崩溃信号处理
 	health.InstallCrashHandlers(crashDir, Version, Commit)
@@ -115,7 +139,6 @@ func main() {
 		Config:    cfg,
 		Registry:  registry,
 		Audit:     auditLogger,
-		Sessions:  sessionMgr,
 		RateLimit: rateLimiter,
 		Deps:      deps,
 	})

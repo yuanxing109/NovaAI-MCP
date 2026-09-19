@@ -477,11 +477,14 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				return errFail("HASH_FAILED", err.Error()), nil
 			}
 
-			if in.Action == "verify" {
+			switch in.Action {
+			case "verify":
 				match := strings.EqualFold(h, in.Expected)
 				return ok(map[string]any{"match": match, "actual": h, "expected": in.Expected}), nil
+			case "calculate":
+				return ok(map[string]any{"algorithm": in.Algorithm, "hash": h}), nil
 			}
-			return ok(map[string]any{"algorithm": in.Algorithm, "hash": h}), nil
+			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
 }
 

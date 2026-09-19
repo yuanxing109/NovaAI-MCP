@@ -53,27 +53,22 @@ func registerDeviceTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- schedule ----
-	reg("novaai_schedule", "定时任务", "管理一次、周期、Cron 及事件触发任务",
+	//
+	// 注意：这不是调度器。它只把脚本存到 stateDir/schedules/ 并按需手动执行，
+	// 服务本身没有任何定时触发机制。action 与描述必须如实反映这一点 ——
+	// 早期版本声明了 cron/every/at 并把它们写成脚本注释，但没有任何代码读它们，
+	// 于是"创建了定时任务"变成了一个不会被触发的空承诺。
+	reg("novaai_schedule", "脚本任务", "保存、列出、删除或手动运行命名脚本（本服务不自动触发）",
 		objSchema(map[string]any{
-			"action":       enumProp("操作", "list", "create", "update", "remove", "enable", "disable", "run"),
-			"scheduleId":   strProp("任务 ID"),
-			"name":         strProp("任务名"),
-			"command":      strProp("执行命令"),
-			"cron":         strProp("五字段 Cron 表达式"),
-			"everySeconds": intProp("间隔秒数"),
-			"at":           strProp("RFC3339 时间"),
-			"targetTool":   strProp("定时任务目标工具名"),
+			"action":     enumProp("操作", "list", "create", "remove", "run"),
+			"scheduleId": strProp("任务 ID"),
+			"command":    strProp("脚本内容"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action       string `json:"action"`
-				ScheduleID   string `json:"scheduleId"`
-				Name         string `json:"name"`
-				Command      string `json:"command"`
-				Cron         string `json:"cron"`
-				EverySeconds int    `json:"everySeconds"`
-				At           string `json:"at"`
-				TargetTool   string `json:"targetTool"`
+				Action     string `json:"action"`
+				ScheduleID string `json:"scheduleId"`
+				Command    string `json:"command"`
 			}
 			_ = json.Unmarshal(args, &in)
 
@@ -98,16 +93,8 @@ func registerDeviceTools(reg RegisterFn, deps *Deps) {
 					return errFail("INVALID_PARAM", "非法 scheduleId: "+id), nil
 				}
 				_ = os.MkdirAll(scheduleDir, 0700)
-				content := in.Command
-				if in.Cron != "" {
-					content = "# cron: " + in.Cron + "\n" + content
-				} else if in.EverySeconds > 0 {
-					content = "# every: " + itoa(in.EverySeconds) + "\n" + content
-				} else if in.At != "" {
-					content = "# at: " + in.At + "\n" + content
-				}
 				path := scheduleDir + "/" + id + ".sh"
-				_ = os.WriteFile(path, []byte(content), 0700)
+				_ = os.WriteFile(path, []byte(in.Command), 0700)
 				return ok(map[string]any{"id": id, "path": path}), nil
 			case "remove":
 				if !idRe.MatchString(in.ScheduleID) {
@@ -126,32 +113,6 @@ func registerDeviceTools(reg RegisterFn, deps *Deps) {
 				return ok(map[string]any{
 					"output": out, "stderr": errOut, "exitCode": code,
 				}), nil
-			}
-			return errFail("UNKNOWN_ACTION", in.Action), nil
-		})
-
-	// ---- task ----
-	reg("novaai_task", "任务管理", "读取、列出、更新、取消任务或读取日志",
-		objSchema(map[string]any{
-			"action":   enumProp("操作", "get", "list", "update", "cancel", "logs"),
-			"taskId":   strProp("任务 ID"),
-			"message":  strProp("消息"),
-			"progress": map[string]any{"type": "number"},
-		}, "action"),
-		func(ctx context.Context, args json.RawMessage) (any, error) {
-			var in struct {
-				Action   string  `json:"action"`
-				TaskID   string  `json:"taskId"`
-				Message  string  `json:"message"`
-				Progress float64 `json:"progress"`
-			}
-			_ = json.Unmarshal(args, &in)
-
-			switch in.Action {
-			case "list":
-				return ok(map[string]any{"tasks": []any{}}), nil
-			case "get":
-				return errFail("NOT_FOUND", "任务系统未启动"), nil
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})

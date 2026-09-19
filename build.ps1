@@ -35,8 +35,14 @@ $Root      = $PSScriptRoot
 $SrcDir    = Join-Path $Root 'src'
 $BinDir    = Join-Path $Root 'bin'
 $DistDir   = Join-Path $Root 'dist'
-$ModuleName = 'NovaAI-MCP-v0.05'
-$Version    = '0.05'
+
+# 版本号唯一来源是 module.prop，与 customize.sh / action.sh / build.sh 一致。
+$propPath = Join-Path $Root 'module.prop'
+if (-not (Test-Path -LiteralPath $propPath)) { throw "缺少 $propPath" }
+$Version = (Select-String -LiteralPath $propPath -Pattern '^version=(.*)$' |
+            Select-Object -First 1).Matches[0].Groups[1].Value.Trim()
+if ([string]::IsNullOrEmpty($Version)) { throw "无法从 module.prop 读取 version" }
+$ModuleName = "NovaAI-MCP-v$Version"
 
 $ArchTargets = @(
     @{ Dir = 'arm64-v8a';   GOOS = 'android'; GOARCH = 'arm64'; Extra = @{} },
@@ -165,7 +171,8 @@ function Build-ModuleZip {
     try {
         # 模块根文件
         foreach ($f in @('module.prop', 'customize.sh', 'service.sh', 'post-fs-data.sh',
-                         'uninstall.sh', 'action.sh', 'common.sh', 'sepolicy.rule', 'README.md')) {
+                         'uninstall.sh', 'action.sh', 'common.sh', 'sepolicy.rule', 'README.md',
+                         'LICENSE')) {
             Copy-Item -LiteralPath (Join-Path $Root $f) -Destination $stage
         }
 

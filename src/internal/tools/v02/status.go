@@ -12,10 +12,9 @@ import (
 )
 
 func registerStatusTools(reg RegisterFn, deps *Deps) {
-	reg("novaai_status", "服务状态", "读取服务、Root、地址、任务与运行时间状态",
-		objSchema(map[string]any{
-			"action": enumProp("明确操作", "get"),
-		}, "action"),
+	// 无参数单动作工具：早期版本声明了 action("get")，handler 从不读它。
+	reg("novaai_status", "服务状态", "读取服务版本、地址、安全开关与运行时间",
+		objSchema(map[string]any{}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			up := readUptime()
 			v := deps.Version
@@ -42,16 +41,11 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 			}), nil
 		})
 
-	reg("novaai_capabilities", "能力探测", "读取或重新探测设备能力与降级原因",
-		objSchema(map[string]any{
-			"action": enumProp("明确操作", "get", "probe"),
-		}, "action"),
+	// 无参数单动作工具：早期版本声明了 action(get/probe)，但 handler
+	// 只探测一次、不读 action —— get 与 probe 是同一个行为。
+	reg("novaai_capabilities", "能力探测", "探测设备能力与降级原因",
+		objSchema(map[string]any{}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
-			var in struct {
-				Action string `json:"action"`
-			}
-			_ = json.Unmarshal(args, &in)
-
 			commands := map[string]string{}
 			missing := []string{}
 			for _, c := range []string{
@@ -74,9 +68,9 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 			}), nil
 		})
 
-	reg("novaai_config", "服务配置", "读取、验证、原子更新、导出或恢复服务配置",
+	reg("novaai_config", "服务配置", "读取、验证、原子更新或导出服务配置",
 		objSchema(map[string]any{
-			"action":      enumProp("明确操作", "get", "validate", "update", "export", "reset"),
+			"action":      enumProp("明确操作", "get", "validate", "update", "export"),
 			"config":      map[string]any{"type": "object"},
 			"destination": map[string]any{"type": "string"},
 		}, "action"),
@@ -130,17 +124,14 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 					return nil, err
 				}
 				return ok(map[string]any{"path": target}), nil
-			case "reset":
-				return errFail("RISK3_NOT_IMPLEMENTED", "reset 需通过文件确认通道"), nil
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
 
 	reg("novaai_diagnostics", "自检诊断", "执行自检或生成完整诊断报告",
 		objSchema(map[string]any{
-			"action":     enumProp("明确操作", "self_test", "collect"),
-			"path":       map[string]any{"type": "string"},
-			"background": map[string]any{"type": "boolean"},
+			"action": enumProp("明确操作", "self_test", "collect"),
+			"path":   map[string]any{"type": "string"},
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -173,6 +164,10 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 
 				_ = os.WriteFile(target, []byte(b.String()), 0600)
 				return ok(map[string]any{"path": target}), nil
+			}
+
+			if in.Action != "self_test" {
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			return ok(map[string]any{

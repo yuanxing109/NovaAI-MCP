@@ -18,9 +18,7 @@
   "audit": { ... },
   "rateLimit": { ... },
   "session": { ... },
-  "skill": { ... },
-  "uninstall": { ... },
-  "capabilities": { ... }
+  "uninstall": { ... }
 }
 ```
 
@@ -58,17 +56,19 @@
 
 ### paths (路径配置)
 
+子目录（downloads / uploads / artifacts / tmp）不再单独配置：`stateDir` 就是那个旋钮。
+它们仍会作为 `stateDir` 下的固定子目录被创建，并由 `pathguard` 视为可写子树。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | stateDir | 字符串 | /data/adb/novaai-mcp | 状态目录（配置、日志等） |
 | workDir | 字符串 | /storage/emulated/0/novaaiAI | 工作目录（用户数据） |
-| workspaceRoot | 字符串 | {stateDir}/workspace | 工作空间根目录 |
-| downloadsDir | 字符串 | {stateDir}/downloads | 下载目录 |
-| uploadsDir | 字符串 | {stateDir}/uploads | 上传目录 |
-| artifactsDir | 字符串 | {stateDir}/artifacts | 产物目录 |
-| tempDir | 字符串 | {stateDir}/tmp | 临时目录 |
+| workspaceRoot | 字符串 | {stateDir}/workspace | 工作空间根目录（相对路径的解析基准） |
 | auditDir | 字符串 | {stateDir}/audit | 审计日志目录 |
-| crashDir | 字符串 | {stateDir}/crash | 崩溃转储目录 |
+
+崩溃转储目录固定为 `{stateDir}/crash`，不可配置：崩溃处理器必须在配置加载
+**之前**装好，否则配置解析阶段自身的 panic 没有兜底 —— 一个只能在配置就绪后
+才可能生效的字段等于没有这个字段。
 
 **示例**:
 ```json
@@ -76,12 +76,7 @@
   "stateDir": "/data/adb/novaai-mcp",
   "workDir": "/storage/emulated/0/novaaiAI",
   "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-  "downloadsDir": "/data/adb/novaai-mcp/downloads",
-  "uploadsDir": "/data/adb/novaai-mcp/uploads",
-  "artifactsDir": "/data/adb/novaai-mcp/artifacts",
-  "tempDir": "/data/adb/novaai-mcp/tmp",
-  "auditDir": "/data/adb/novaai-mcp/audit",
-  "crashDir": "/data/adb/novaai-mcp/crash"
+  "auditDir": "/data/adb/novaai-mcp/audit"
 }
 ```
 
@@ -91,34 +86,18 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| maxConnections | 整数 | 128 | 最大并发连接数 |
-| maxRequestBytes | 整数 | 67108864 | 最大请求体大小 (64MB) |
-| totalTasks | 整数 | 16 | 最大任务数 |
-| heavyTasks | 整数 | 2 | 最大重任务数 |
-| shellTimeoutSeconds | 整数 | 60 | Shell 命令超时时间 |
-| transferChunkBytes | 整数 | 1048576 | 传输分块大小 (1MB) |
-| transferMaxBytes | 整数 | 1073741824 | 最大传输大小 (1GB) |
-| resultPreviewBytes | 整数 | 262144 | 结果预览大小 (256KB) |
-| artifactTtlSeconds | 整数 | 604800 | 产物保留时间 (7天) |
+| maxRequestBytes | 整数 | 67108864 | 最大请求体大小 (64MB)，超限返回 `-32600` |
+| shellTimeoutSeconds | 整数 | 60 | `novaai_shell` / `novaai_script` 未显式指定 `timeoutMs` 时的默认超时 |
+| resultPreviewBytes | 整数 | 1048576 | 单个工具结果的字节上限 (1MB)，超限截断并丢弃 `structuredContent` |
 | shutdownGraceSeconds | 整数 | 30 | 优雅关闭等待时间 |
-| uploadIdleTtlSeconds | 整数 | 1800 | 上传空闲超时 (30分钟) |
-| downloadRetryAttempts | 整数 | 3 | 下载重试次数 |
 
 **示例**:
 ```json
 "limits": {
-  "maxConnections": 128,
   "maxRequestBytes": 67108864,
-  "totalTasks": 16,
-  "heavyTasks": 2,
   "shellTimeoutSeconds": 60,
-  "transferChunkBytes": 1048576,
-  "transferMaxBytes": 1073741824,
-  "resultPreviewBytes": 262144,
-  "artifactTtlSeconds": 604800,
-  "shutdownGraceSeconds": 30,
-  "uploadIdleTtlSeconds": 1800,
-  "downloadRetryAttempts": 3
+  "resultPreviewBytes": 1048576,
+  "shutdownGraceSeconds": 30
 }
 ```
 
@@ -173,7 +152,6 @@
 | enabled | 布尔 | true | 是否启用 Unix Socket |
 | path | 字符串 | {stateDir}/mcp.sock | Socket 文件路径 |
 | mode | 字符串 | 0660 | Socket 文件权限 |
-| group | 字符串 | shell | Socket 文件所属组 |
 | sepolicyInject | 布尔 | true | 是否注入 SELinux 策略 |
 
 **示例**:
@@ -182,7 +160,6 @@
   "enabled": true,
   "path": "/data/adb/novaai-mcp/mcp.sock",
   "mode": "0660",
-  "group": "shell",
   "sepolicyInject": true
 }
 ```
@@ -231,7 +208,7 @@
 "profiles": {
   "default": {
     "allowTools": ["*"],
-    "denyTools": ["novaai_shell", "novaai_script", "novaai_config",
+    "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_config",
                   "novaai_root_module", "novaai_systemless"],
     "riskCeiling": 3
   },
@@ -243,9 +220,10 @@
 }
 ```
 
-> `default` 默认不含 `novaai_shell` / `novaai_script`：通用 shell 能绕过所有
-> 工具级防护，所以默认交给 `agent_full`。需要时把 token 绑到 `agent_full`，
-> 详见 [docs/security.md](security.md)。
+> `default` 默认不含 `novaai_shell` / `novaai_script` / `novaai_schedule`：
+> 这三个都能到达任意命令执行（`novaai_schedule` 是 create 写脚本 + run 用 `sh` 执行），
+> 通用 shell 能绕过所有工具级防护，所以默认交给 `agent_full`。
+> 需要时把 token 绑到 `agent_full`，详见 [docs/security.md](security.md)。
 
 ---
 
@@ -288,8 +266,7 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
 | retentionDays | 整数 | 30 | 审计日志保留天数 |
 | includeArgs | 布尔 | true | 是否记录工具参数 |
 | argPreviewBytes | 整数 | 256 | 参数预览最大字节数 |
-| redactMode | 字符串 | allowlist | 脱敏模式 (allowlist/all/none) |
-| allowlistFields | 字符串数组 | [...] | 允许记录的字段列表 |
+| allowlistFields | 字符串数组 | [...] | 允许记录的字段列表（其余字段一律脱敏） |
 
 **示例**:
 ```json
@@ -300,10 +277,11 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   "retentionDays": 30,
   "includeArgs": true,
   "argPreviewBytes": 256,
-  "redactMode": "allowlist",
   "allowlistFields": ["action", "path", "package", "name"]
 }
 ```
+
+> 只有 `allowlist` 一种脱敏实现，没有可关闭脱敏的开关。
 
 ---
 
@@ -312,8 +290,13 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | global | 对象 | 全局限制 |
-| perSession | 对象 | 每会话限制 |
+| perSession | 对象 | 第二层限制，**按客户端身份（token 哈希）计数** |
 | perTool | 对象 | 每工具限制 |
+
+> `perSession` 这个名字里的 "session" 指**客户端身份**，不是 MCP 的
+> `Mcp-Session-Id`。后者由客户端自行携带，换一个或不带就能拿到一个全新的
+> 满额桶，用它做限流键等于没有限流。因此服务端用 token 的 `sha256` 作为键；
+> 无 token 的入口（unix socket、匿名 loopback）共用一个 `local` 桶。
 
 **示例**:
 ```json
@@ -322,9 +305,7 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   "perSession": {
     "qps": 20,
     "burst": 40,
-    "maxConcurrentTools": 5,
-    "totalUploadBytes": 5368709120,
-    "totalDownloadBytes": 5368709120
+    "maxConcurrentTools": 5
   },
   "perTool": {
     "novaai_shell": {"qps": 10, "burst": 20}
@@ -335,6 +316,10 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
 ---
 
 ### session (会话配置)
+
+只有携带有效 `Mcp-Session-Id` 的请求，以及包含 `initialize` 的请求，才会占用
+会话名额。其余请求走无状态路径，不登记会话 —— 否则不实现会话的客户端每发一个
+请求就会消耗一个名额，很快撞上 `maxSessions` 并持续收到 `-32014`。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -348,23 +333,6 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   "idleTimeoutSeconds": 1800,
   "maxSessions": 32,
   "sweepIntervalSeconds": 300
-}
-```
-
----
-
-### skill (技能配置)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| learnFromRiskOps | 布尔 | false | 是否从高风险操作学习技能 |
-| maxLearnedSkills | 整数 | 200 | 最大学习技能数 |
-
-**示例**:
-```json
-"skill": {
-  "learnFromRiskOps": false,
-  "maxLearnedSkills": 200
 }
 ```
 
@@ -409,26 +377,13 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
     "stateDir": "/data/adb/novaai-mcp",
     "workDir": "/storage/emulated/0/novaaiAI",
     "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-    "downloadsDir": "/data/adb/novaai-mcp/downloads",
-    "uploadsDir": "/data/adb/novaai-mcp/uploads",
-    "artifactsDir": "/data/adb/novaai-mcp/artifacts",
-    "tempDir": "/data/adb/novaai-mcp/tmp",
-    "auditDir": "/data/adb/novaai-mcp/audit",
-    "crashDir": "/data/adb/novaai-mcp/crash"
+    "auditDir": "/data/adb/novaai-mcp/audit"
   },
   "limits": {
-    "maxConnections": 128,
     "maxRequestBytes": 67108864,
-    "totalTasks": 16,
-    "heavyTasks": 2,
     "shellTimeoutSeconds": 60,
-    "transferChunkBytes": 1048576,
-    "transferMaxBytes": 1073741824,
-    "resultPreviewBytes": 262144,
-    "artifactTtlSeconds": 604800,
-    "shutdownGraceSeconds": 30,
-    "uploadIdleTtlSeconds": 1800,
-    "downloadRetryAttempts": 3
+    "resultPreviewBytes": 1048576,
+    "shutdownGraceSeconds": 30
   },
   "security": {
     "anonymous": false,
@@ -445,7 +400,6 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
       "enabled": true,
       "path": "/data/adb/novaai-mcp/mcp.sock",
       "mode": "0660",
-      "group": "shell",
       "sepolicyInject": true
     },
     "lan": {
@@ -456,7 +410,7 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
   "profiles": {
     "default": {
       "allowTools": ["*"],
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_config",
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_config",
                     "novaai_root_module", "novaai_systemless"],
       "riskCeiling": 3
     },
@@ -477,12 +431,11 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
     "retentionDays": 30,
     "includeArgs": true,
     "argPreviewBytes": 256,
-    "redactMode": "allowlist",
     "allowlistFields": ["action", "path", "package"]
   },
   "rateLimit": {
     "global": {"qps": 50, "burst": 100},
-    "perSession": {"qps": 20, "burst": 40},
+    "perSession": {"qps": 20, "burst": 40, "maxConcurrentTools": 5},
     "perTool": {}
   },
   "session": {
@@ -490,16 +443,11 @@ printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
     "maxSessions": 32,
     "sweepIntervalSeconds": 300
   },
-  "skill": {
-    "learnFromRiskOps": false,
-    "maxLearnedSkills": 200
-  },
   "uninstall": {
     "purgeInternalState": false,
     "purgeAuditLogs": false,
     "purgeCrashDumps": false,
     "purgeUserData": false
-  },
-  "capabilities": {}
+  }
 }
 ```

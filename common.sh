@@ -64,8 +64,38 @@ zcr_detect_su() {
   return 1
 }
 
+# 判断 pid 是否确实是本模块的 daemon。
+#
+# PID 文件会残留（daemon 被 SIGKILL 时来不及清理），而 PID 会被系统复用；
+# 不做身份校验就可能 kill 掉一个无关进程。
+zcr_is_daemon() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # comm 由内核按可执行文件名设置，比 cmdline 少一层 NUL 分隔解析
+  if [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "novaaimcpd" ]; then
+    return 0
+  fi
+  case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" in
+    *novaaimcpd*) return 0 ;;
+  esac
+  return 1
+}
+
+# 输出 daemon 的 PID。文件不存在、进程已退出或 PID 已被复用时输出空。
 zcr_read_pid() {
-  [ -f "$ZCR_PID_FILE" ] && cat "$ZCR_PID_FILE"
+  local pid
+  [ -f "$ZCR_PID_FILE" ] || return 0
+  pid="$(cat "$ZCR_PID_FILE" 2>/dev/null)"
+  zcr_is_daemon "$pid" || return 0
+  echo "$pid"
+}
+
+# 版本号唯一来源是 module.prop，脚本内不再硬编码版本。
+zcr_module_version() {
+  local v
+  v="$(grep '^version=' "$ZCR_MODDIR/module.prop" 2>/dev/null | head -n1 | cut -d= -f2)"
+  if [ -n "$v" ]; then echo "$v"; else echo "unknown"; fi
 }
 
 zcr_start_supervisor() {
@@ -87,30 +117,44 @@ zcr_start_supervisor() {
     chmod 0755 "$binary" 2>/dev/null
   fi
 
+  # PID 文件由 daemon 自己写（唯一 owner），这里只负责等它出现。
+  #
+  # 旧实现在这里写 `$!`，那是 `su` 进程的 PID；daemon 是 su 的孙进程，
+  # 停止信号因此可能到不了 daemon。见 docs/KNOWN_ISSUES.md。
+  rm -f "$ZCR_PID_FILE" 2>/dev/null
   nohup "$su_path" -c "$binary --state $ZCR_INTERNAL_DIR" \
     >> "$ZCR_LOG_FILE" 2>&1 &
-  echo $! > "$ZCR_PID_FILE"
-  zcr_log "supervisor 已启动 pid=$(cat "$ZCR_PID_FILE")"
+
+  local i pid
+  i=0
+  while [ "$i" -lt 50 ]; do
+    pid="$(zcr_read_pid 2>/dev/null)"
+    if [ -n "$pid" ]; then
+      zcr_log "daemon 已启动 pid=$pid"
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  zcr_log "daemon 启动后 5 秒内未写入 PID 文件"
+  return 1
 }
 
 zcr_stop_supervisor() {
-  local pid
+  local pid i
   pid="$(zcr_read_pid)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null
-    for i in 1 2 3 4 5; do
+    i=0
+    while [ "$i" -lt 5 ]; do
       sleep 1
-      kill -0 "$pid" 2>/dev/null || break
+      zcr_is_daemon "$pid" || break
+      i=$((i + 1))
     done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+    if zcr_is_daemon "$pid"; then
+      kill -KILL "$pid" 2>/dev/null
+    fi
   fi
   rm -f "$ZCR_PID_FILE"
-  zcr_log "supervisor 已停止"
-}
-
-zcr_print_summary() {
-  echo "内部状态目录: $ZCR_INTERNAL_DIR"
-  echo "用户目录: $ZCR_USER_DIR"
-  echo "监听地址: http://127.0.0.1:5322/mcp"
-  echo "Token 文件: $ZCR_TOKEN"
+  zcr_log "daemon 已停止"
 }

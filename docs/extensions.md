@@ -1,8 +1,8 @@
 # NovaAI-MCP MCP 扩展规范 v1
 
 本规范定义 NovaAI-MCP 在标准 MCP 2025-06-18 之上引入的私有扩展字段、
-长任务机制、技能系统与错误码约定。任何客户端读取本文档后即可完整对接
-所有扩展能力；不实现这些扩展的客户端仍可正常使用标准 `tools/call` 接口。
+技能系统与错误码约定。任何客户端读取本文档后即可完整对接所有扩展能力；
+不实现这些扩展的客户端仍可正常使用标准 `tools/call` 接口。
 
 ---
 
@@ -21,7 +21,6 @@
     "protocolVersion": "2025-06-18",
     "capabilities": {
       "experimental": {
-        "novaai_tasks": true,
         "novaai_skill": true
       }
     },
@@ -35,10 +34,13 @@
 
 | 字段 | 含义 |
 |------|------|
-| novaai_tasks | 客户端支持长任务的 taskId 轮询 |
 | novaai_skill | 客户端支持技能系统的 match/get |
 
 未声明时，服务端返回的 instructions 会引导客户端使用 fallback 方式处理。
+
+> 曾经声明的 `novaai_tasks`（长任务 taskId 轮询）**已移除**：服务端没有任何
+> 工具会产生 taskId，`novaai_task` 工具本身也从未实现。声明一个不存在的能力
+> 只会让客户端去轮询一个永远为空的接口。
 
 ### 1.2 服务端响应
 
@@ -103,76 +105,40 @@
 拒绝时返回 JSON-RPC 错误 `-32003` 并写入 `profile_denied` 审计。
 profile 的选取见 [config.md](config.md) 的 profiles 与 sessionBinding 两节。
 
----
+### 2.3 action 枚举
 
-## 3. 长任务扩展
+凡是按 `action` 分派的工具，其 `inputSchema` 都使用 `enum` 声明该参数，
+客户端可以据此在调用前发现不支持的操作。
 
-### 3.1 任务提交
+**但服务端不校验 `inputSchema`。** `internal/mcp/server.go` 把 `arguments`
+原样交给 handler，不做 enum / required / 类型检查 —— 因此 schema 是**给客户端
+看的契约**，不是服务端的准入闸门。真正兜住未知输入的是每个 handler 自己的
+`default` 分支，返回 `UNKNOWN_ACTION`。
 
-当工具执行时间可能超过 30 秒时，服务端返回 taskId：
+这条不变式由两处机械保证（不是靠人记得写）：
 
-```json
-{
-  "success": true,
-  "code": "OK",
-  "taskId": "task-20250618-120000-abc123",
-  "status": "running",
-  "pollIntervalMs": 1000
-}
-```
+- `scripts/audit_actions.ps1`：静态检查「schema 声明的 action 都有分派」
+  「声明了 action 就必须读 `in.Action`」「读了 action 就必须有兜底分支」
+  「schema 参数名必须在 handler 里有同名 json tag」；
+- `src/internal/tools/v02/actions_test.go`：用真实 handler 逐个试，断言未知
+  action 与缺失 action 都"不 panic、不成功"。它比静态检查更强，且不依赖正则。
 
-### 3.2 任务轮询
-
-客户端使用 `novaai_task` 工具查询任务状态：
-
-```json
-{
-  "name": "novaai_task",
-  "arguments": {
-    "action": "get",
-    "taskId": "task-20250618-120000-abc123"
-  }
-}
-```
-
-响应：
-
-```json
-{
-  "success": true,
-  "data": {
-    "taskId": "task-20250618-120000-abc123",
-    "status": "completed",
-    "progress": 1.0,
-    "result": { ... },
-    "artifacts": [
-      {
-        "name": "output.zip",
-        "path": "/data/adb/novaai-mcp/artifacts/task-xxx/output.zip",
-        "size": 1024000
-      }
-    ]
-  }
-}
-```
-
-### 3.3 任务取消
-
-```json
-{
-  "name": "novaai_task",
-  "arguments": {
-    "action": "cancel",
-    "taskId": "task-20250618-120000-abc123"
-  }
-}
-```
+删除一个 action 之后，旧客户端仍可能发那个字符串。它必须得到一次干净的
+`UNKNOWN_ACTION` 失败，而不是 panic —— 后者会被 `safeCall` 的 `recover` 兜成
+`工具 X 内部 panic`，把真正原因藏起来。修复前有 9 个 handler 属于这种情况，
+详见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md) 第 5c 节。
 
 ---
 
-## 4. 技能系统扩展
+## 3. 技能系统扩展
 
-### 4.1 技能匹配
+技能来自**内置**目录（随模块安装的 `skills/*.md`）。不存在"自动学习"：
+服务端没有写入 learned 技能的代码路径，`novaai_skill` 也不再有 `skillSource`
+参数或 `source` 字段 —— 只会有内置技能一种来源。
+
+匹配是**大小写不敏感的子串包含**，不是语义检索；结果不返回相似度分数。
+
+### 3.1 技能匹配
 
 ```json
 {
@@ -192,17 +158,13 @@ profile 的选取见 [config.md](config.md) 的 profiles 与 sessionBinding 两�
   "success": true,
   "data": {
     "matches": [
-      {
-        "id": "screenshot",
-        "source": "builtin",
-        "score": 0.95
-      }
+      { "id": "screenshot" }
     ]
   }
 }
 ```
 
-### 4.2 技能获取
+### 3.2 技能获取
 
 ```json
 {
@@ -226,31 +188,40 @@ profile 的选取见 [config.md](config.md) 的 profiles 与 sessionBinding 两�
 }
 ```
 
+### 3.3 可用操作
+
+| action | 说明 |
+|--------|------|
+| match | 按查询文本对内置技能做子串匹配，最多返回 `limit` 条 |
+| get | 读取指定技能的正文 |
+| list | 列出全部内置技能（`id` + `path`） |
+| stats | 返回内置技能总数 |
+
 ---
 
-## 5. 错误码约定
+## 4. 错误码约定
 
-### 5.1 JSON-RPC 标准错误码
+### 4.1 JSON-RPC 标准错误码
 
 | 错误码 | 含义 |
 |--------|------|
 | -32700 | JSON 解析失败 |
-| -32600 | 无效的请求 |
+| -32600 | 无效的请求（含请求体超过 `limits.maxRequestBytes`） |
 | -32601 | 方法不存在 |
 | -32602 | 无效的参数 |
 | -32603 | 内部错误 |
 
-### 5.2 NovaAI 自定义错误码
+### 4.2 NovaAI 自定义错误码
 
 | 错误码 | 含义 |
 |--------|------|
 | -32001 | 鉴权失败（含 Host/Origin 校验失败） |
 | -32009 | 频率限制 |
 | -32010 | 并发超限 |
-| -32014 | 会话创建失败 |
+| -32014 | 会话创建失败（会话数达到 `session.maxSessions`） |
 | -32015 | 工具不存在 |
 
-### 5.3 工具级错误码
+### 4.3 工具级错误码
 
 工具返回的 `code` 字段：
 
@@ -263,26 +234,43 @@ profile 的选取见 [config.md](config.md) 的 profiles 与 sessionBinding 两�
 | NOT_CONFIRMED | 需要确认 |
 | NOT_FOUND | 资源未找到 |
 
+> **结果截断不通过 code 表达。** 当单个工具结果超过 `limits.resultPreviewBytes`
+> 时，服务端把 `content` 截断到上限（不切断 UTF-8 字符），追加一行
+> `[结果已截断：原始 N 字节，上限 M 字节。请用更精确的参数缩小范围。]`，
+> 并**丢弃 `structuredContent`**。只截 `content` 而保留完整的结构化副本
+> 等于没省流量，还会让两者不一致。`isError` 保持 `false` —— 截断不是失败。
+
 ---
 
-## 6. 会话管理
+## 5. 会话管理
 
-### 6.1 会话创建
+### 5.1 会话分配
 
-会话在首次请求时自动创建，通过 `Mcp-Session-Id` 头传递。
+| 请求 | 行为 |
+|------|------|
+| 包含 `initialize` | 创建会话，响应头返回 `Mcp-Session-Id` |
+| 携带有效 `Mcp-Session-Id` | 复用该会话 |
+| 其余请求 | **无状态**，不登记会话、不占用名额 |
 
-### 6.2 会话状态
+最后一行是关键：早期实现给每个不带 sid 的请求都建一个新会话，导致不实现
+会话的客户端每发一个请求就消耗一个 `session.maxSessions` 名额，约 32 次
+之后开始持续收到 `-32014`，直到空闲超时（默认 30 分钟）才恢复。
+
+### 5.2 会话观测
 
 ```json
 {
-  "name": "novaai_session_status",
+  "name": "novaai_session_list",
   "arguments": {}
 }
 ```
 
+返回当前活跃会话的列表。`novaai_session_status` 返回当前请求所在会话的详情
+（无状态请求返回 `stateless: true`）。
+
 ---
 
-## 7. 审计日志
+## 6. 审计日志
 
 所有工具调用都会记录审计日志，格式：
 

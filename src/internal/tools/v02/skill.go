@@ -8,45 +8,43 @@ import (
 	"strings"
 )
 
+// registerSkillTools 注册技能工具。
+//
+// 只有内置技能。服务没有"自动学习"机制：stateDir/skills/learned 从来没有任何
+// 代码写入过。因此早期版本声明的 skillSource（all/builtin/learned）与 forget
+// 动作都是在承诺不存在的能力 —— forget 只允许删 learned 下的文件，而 learned
+// 永远是空的，所以它必然失败。
 func registerSkillTools(reg RegisterFn, deps *Deps) {
-	reg("novaai_skill", "技能系统", "渐进匹配、按需读取并管理内置及自动学习技能",
+	reg("novaai_skill", "技能系统", "按关键词匹配并读取内置技能文档",
 		objSchema(map[string]any{
-			"action":      enumProp("操作", "match", "get", "list", "stats", "forget"),
-			"query":       strProp("搜索查询"),
-			"id":          strProp("技能 ID"),
-			"limit":       intProp("返回上限"),
-			"offset":      intProp("偏移"),
-			"skillSource": enumProp("来源", "all", "builtin", "learned"),
+			"action": enumProp("操作", "match", "get", "list", "stats"),
+			"query":  strProp("搜索查询"),
+			"id":     strProp("技能 ID"),
+			"limit":  intProp("返回上限"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action      string `json:"action"`
-				Query       string `json:"query"`
-				ID          string `json:"id"`
-				Limit       int    `json:"limit"`
-				Offset      int    `json:"offset"`
-				SkillSource string `json:"skillSource"`
+				Action string `json:"action"`
+				Query  string `json:"query"`
+				ID     string `json:"id"`
+				Limit  int    `json:"limit"`
 			}
 			_ = json.Unmarshal(args, &in)
 
 			skillsDir := filepath.Join(deps.StateDir, "skills")
-			learnedDir := filepath.Join(skillsDir, "learned")
 
 			switch in.Action {
 			case "list":
+				entries, _ := os.ReadDir(skillsDir)
 				var items []map[string]any
-				for _, dir := range []string{skillsDir, learnedDir} {
-					entries, _ := os.ReadDir(dir)
-					for _, e := range entries {
-						if !strings.HasSuffix(e.Name(), ".md") {
-							continue
-						}
-						items = append(items, map[string]any{
-							"id":     strings.TrimSuffix(e.Name(), ".md"),
-							"source": filepath.Base(dir),
-							"path":   filepath.Join(dir, e.Name()),
-						})
+				for _, e := range entries {
+					if !strings.HasSuffix(e.Name(), ".md") {
+						continue
 					}
+					items = append(items, map[string]any{
+						"id":   strings.TrimSuffix(e.Name(), ".md"),
+						"path": filepath.Join(skillsDir, e.Name()),
+					})
 				}
 				return ok(map[string]any{"skills": items}), nil
 			case "get":
@@ -56,13 +54,11 @@ func registerSkillTools(reg RegisterFn, deps *Deps) {
 				if !idRe.MatchString(in.ID) {
 					return errFail("INVALID_PARAM", "非法技能 ID: "+in.ID), nil
 				}
-				for _, dir := range []string{skillsDir, learnedDir} {
-					p := filepath.Join(dir, in.ID+".md")
-					if b, err := os.ReadFile(p); err == nil {
-						return ok(map[string]any{"id": in.ID, "content": string(b)}), nil
-					}
+				b, err := os.ReadFile(filepath.Join(skillsDir, in.ID+".md"))
+				if err != nil {
+					return errFail("NOT_FOUND", in.ID), nil
 				}
-				return errFail("NOT_FOUND", in.ID), nil
+				return ok(map[string]any{"id": in.ID, "content": string(b)}), nil
 			case "match":
 				if in.Query == "" {
 					return errFail("MISSING_QUERY", "query 必填"), nil
@@ -70,53 +66,35 @@ func registerSkillTools(reg RegisterFn, deps *Deps) {
 				if in.Limit <= 0 {
 					in.Limit = 3
 				}
+				entries, _ := os.ReadDir(skillsDir)
 				var hits []map[string]any
-				for _, dir := range []string{skillsDir, learnedDir} {
-					entries, _ := os.ReadDir(dir)
-					for _, e := range entries {
-						if !strings.HasSuffix(e.Name(), ".md") {
-							continue
-						}
-						b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-						if err != nil {
-							continue
-						}
-						if strings.Contains(strings.ToLower(string(b)), strings.ToLower(in.Query)) {
-							hits = append(hits, map[string]any{
-								"id":     strings.TrimSuffix(e.Name(), ".md"),
-								"source": filepath.Base(dir),
-							})
-						}
-						if len(hits) >= in.Limit {
-							break
-						}
+				for _, e := range entries {
+					if !strings.HasSuffix(e.Name(), ".md") {
+						continue
+					}
+					b, err := os.ReadFile(filepath.Join(skillsDir, e.Name()))
+					if err != nil {
+						continue
+					}
+					if strings.Contains(strings.ToLower(string(b)), strings.ToLower(in.Query)) {
+						hits = append(hits, map[string]any{
+							"id": strings.TrimSuffix(e.Name(), ".md"),
+						})
+					}
+					if len(hits) >= in.Limit {
+						break
 					}
 				}
 				return ok(map[string]any{"matches": hits}), nil
 			case "stats":
+				entries, _ := os.ReadDir(skillsDir)
 				count := 0
-				for _, dir := range []string{skillsDir, learnedDir} {
-					entries, _ := os.ReadDir(dir)
-					for range entries {
+				for _, e := range entries {
+					if strings.HasSuffix(e.Name(), ".md") {
 						count++
 					}
 				}
 				return ok(map[string]any{"total": count}), nil
-			case "forget":
-				if in.ID == "" {
-					return errFail("MISSING_ID", "id 必填"), nil
-				}
-				if !idRe.MatchString(in.ID) {
-					return errFail("INVALID_PARAM", "非法技能 ID: "+in.ID), nil
-				}
-				p := filepath.Join(learnedDir, in.ID+".md")
-				if err := guardPath(p, false); err != nil {
-					return errFail("PROTECTED_PATH", err.Error()), nil
-				}
-				if err := os.Remove(p); err != nil {
-					return errFail("REMOVE_FAILED", err.Error()), nil
-				}
-				return okMsg("已删除"), nil
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})

@@ -14,9 +14,11 @@ func DefaultProfiles() map[string]Profile {
 			AllowTools: []string{"*"},
 			// 通用 shell 是万能绕过：只要它可达，pathguard 与 antibrick
 			// 就只是建议。默认把它交给 agent_full。
+			// novaai_schedule 是同一类载体：create 写入任意脚本、run 用 sh 执行它，
+			// 等价于 novaai_shell，不一起挡掉的话 shell 的封锁就是个摆设。
 			// 另挡"自我管理"类工具：不让模型改服务配置或动 root 模块。
 			DenyTools: []string{
-				"novaai_shell", "novaai_script",
+				"novaai_shell", "novaai_script", "novaai_schedule",
 				"novaai_config", "novaai_root_module", "novaai_systemless",
 			},
 			RiskCeiling: 3,
@@ -28,7 +30,7 @@ func DefaultProfiles() map[string]Profile {
 				"novaai_device_info", "novaai_fs_info", "novaai_fs_read",
 				"novaai_fs_search", "novaai_fs_hash", "novaai_app_list",
 				"novaai_app_info", "novaai_process", "novaai_log",
-				"novaai_task", "novaai_skill", "novaai_diagnostics",
+				"novaai_skill", "novaai_diagnostics",
 				"novaai_session_status", "novaai_session_list",
 				"novaai_audit_status", "novaai_auth_status",
 			},
@@ -42,7 +44,8 @@ func DefaultProfiles() map[string]Profile {
 				"novaai_device_info", "novaai_status", "novaai_session_*",
 			},
 			DenyTools: []string{
-				"novaai_shell", "novaai_script", "novaai_power", "novaai_root_module",
+				"novaai_shell", "novaai_script", "novaai_schedule",
+				"novaai_power", "novaai_root_module",
 			},
 			RiskCeiling: 3,
 		},

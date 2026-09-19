@@ -8,7 +8,8 @@ import (
 )
 
 func RegisterAll(reg *Registry, deps *Deps) {
-	// v0.02 原有 49 个工具，通过回调注册避免循环依赖
+	// v0.02 系列工具，通过回调注册避免循环依赖。
+	// 权威数量以 Registry.Count() 为准，这里不写死数字（会漂移）。
 	v02.RegisterAllV02Tools(func(name, title, desc string, schema map[string]any, handler v02.Handler) {
 		reg.Register(&Tool{
 			Name:        name,

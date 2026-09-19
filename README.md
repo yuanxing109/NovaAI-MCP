@@ -36,9 +36,9 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 ### 🛡️ 安全特性
 - Token 认证（loopback 也强制校验，可用 `security.anonymous` 显式关闭）
 - Host / Origin 校验（防 DNS rebinding 与浏览器盲 CSRF）
-- 权限控制（Profile 白/黑名单 + 风险等级上限，按 token 绑定到会话）
+- 权限控制（Profile 白/黑名单 + 风险等级上限，按 token 绑定 profile）
 - 审计日志
-- 频率限制（全局 / 会话 / 单工具三层 + 并发上限）
+- 频率限制（全局 / 客户端身份 / 单工具三层 + 并发上限）
 
 ## 安装要求
 
@@ -48,7 +48,7 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 
 ## 安装方法
 
-1. 下载最新版 [NovaAI-MCP-v0.05.zip](releases)
+1. 从 [Releases](https://github.com/yuanxing109/NovaAI-MCP/releases) 下载 `NovaAI-MCP-v*.zip`
 2. 通过 Magisk/KernelSU/APatch 安装
 3. 重启设备
 
@@ -61,21 +61,29 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 
 ## 工具列表
 
-共 62 个工具，覆盖设备控制的各个方面。
+共 61 个工具，覆盖设备控制的各个方面。
 
 | 类别 | 数量 | 说明 |
 |------|------|------|
-| 服务/状态 | 11 | 状态查询、配置管理、审计、会话 |
-| 设备调度 | 2 | 设备信息、定时任务 |
+| 服务/状态 | 9 | 状态查询、能力探测、配置管理、自检，以及 auth/session/audit/health 状态 |
+| 设备调度 | 2 | 设备信息、脚本任务（本服务不自动触发） |
 | 文件系统 | 6 | 文件读写、搜索、哈希 |
-| 归档传输 | 4 | 压缩、下载、上传 |
+| 归档传输 | 4 | 压缩、下载、上传、导出 |
 | 命令执行 | 2 | Shell、脚本（默认 profile 拒绝，见下） |
 | 应用管理 | 9 | 安装、卸载、权限 |
 | Root/备份 | 4 | 模块管理、备份与恢复 |
-| 系统管理 | 4 | 进程、服务、属性 |
+| 系统管理 | 4 | 进程、服务、属性、设置 |
 | 系统设置 | 10 | 显示、音频、网络 |
 | 网络日志 | 2 | HTTP、日志 |
 | 逆向工程 | 8 | APK/DEX/Smali 分析 |
+| 技能 | 1 | 内置技能文档的匹配与读取 |
+
+> 早期版本的 `novaai_task`（长任务查询）已删除：它的 5 个 action 全部空转，
+> 服务端也没有任何工具会产生 taskId。
+>
+> `tools/list` 返回的 `inputSchema` 是**给客户端的契约**，服务端不做校验 ——
+> 未知 action 由每个 handler 的兜底分支返回 `UNKNOWN_ACTION`。详见
+> [docs/extensions.md](docs/extensions.md) 第 2.3 节。
 
 > 工具调用会按 `profiles` + `sessionBinding` 做白/黑名单与风险等级校验，
 > 详见 [docs/config.md](docs/config.md)。
@@ -107,13 +115,16 @@ novaai_screen → action: screenshot
 novaai_reverse_apk → action: decompile, package: com.app, tool: apktool
 
 # 执行 Shell 命令（默认 profile 会拒绝；把 token 绑到 agent_full 才可用）
-novaai_shell → action: exec, command: "id"
+novaai_shell → command: "id"
 ```
+
+> `novaai_shell` 不带 `action`：它是单动作工具。带 `action` 的工具只有
+> 真正按 action 分派行为的那些。
 
 ## 许可证
 
-MIT License
+本项目采用 MIT License，详见 [LICENSE](LICENSE)。
 
 ## 项目地址
 
-GitHub: [NovaAI-MCP](https://github.com/YOUR_USERNAME/NovaAI-MCP)
+GitHub: [yuanxing109/NovaAI-MCP](https://github.com/yuanxing109/NovaAI-MCP)

@@ -16,20 +16,17 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 	// ---- shell ----
 	reg("novaai_shell", "执行命令", "以 root、shell 或指定 UID 执行命令",
 		objSchema(map[string]any{
-			"action":     enumProp("操作", "exec"),
-			"command":    strProp("要执行的命令"),
-			"cmd":        strProp("command 兼容别名"),
-			"identity":   enumProp("身份", "root", "shell", "current", "uid"),
-			"uid":        intProp("目标 UID"),
-			"cwd":        strProp("工作目录"),
-			"env":        map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-			"stdin":      strProp("标准输入"),
-			"timeoutMs":  intProp("超时毫秒"),
-			"background": boolProp("后台"),
-		}, "action"),
+			"command":   strProp("要执行的命令"),
+			"cmd":       strProp("command 兼容别名"),
+			"identity":  enumProp("身份", "root", "shell", "current", "uid"),
+			"uid":       intProp("目标 UID"),
+			"cwd":       strProp("工作目录"),
+			"env":       map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+			"stdin":     strProp("标准输入"),
+			"timeoutMs": intProp("超时毫秒"),
+		}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action    string            `json:"action"`
 				Command   string            `json:"command"`
 				Cmd       string            `json:"cmd"`
 				Identity  string            `json:"identity"`
@@ -50,7 +47,7 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 			}
 
 			if in.TimeoutMs <= 0 {
-				in.TimeoutMs = 60000
+				in.TimeoutMs = int(shellTimeout(deps) / time.Millisecond)
 			}
 
 			// 身份处理
@@ -92,7 +89,7 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 			}
 
 			// 硬性规定：shell 不走 Adapter.Preprocess
-			out, errOut, code, err := runShRaw(ctx, finalCmd, in.Stdin,
+			out, errOut, code, err := runShRaw(ctx, deps, finalCmd, in.Stdin,
 				time.Duration(in.TimeoutMs)*time.Millisecond)
 			if err != nil {
 				return errFail("EXEC_FAILED", err.Error()), nil
@@ -110,16 +107,15 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 	// ---- script ----
 	reg("novaai_script", "执行脚本", "验证或执行多行脚本",
 		objSchema(map[string]any{
-			"action":     enumProp("操作", "validate", "run"),
-			"script":     strProp("脚本文本"),
-			"content":    strProp("script 兼容别名"),
-			"identity":   enumProp("身份", "root", "shell", "current", "uid"),
-			"uid":        intProp("目标 UID"),
-			"cwd":        strProp("工作目录"),
-			"env":        map[string]any{"type": "object"},
-			"stdin":      strProp("标准输入"),
-			"timeoutMs":  intProp("超时毫秒"),
-			"background": boolProp("后台"),
+			"action":    enumProp("操作", "validate", "run"),
+			"script":    strProp("脚本文本"),
+			"content":   strProp("script 兼容别名"),
+			"identity":  enumProp("身份", "root", "shell", "current", "uid"),
+			"uid":       intProp("目标 UID"),
+			"cwd":       strProp("工作目录"),
+			"env":       map[string]any{"type": "object"},
+			"stdin":     strProp("标准输入"),
+			"timeoutMs": intProp("超时毫秒"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -145,16 +141,19 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 
 			if in.Action == "validate" {
 				// 用 sh -n 校验语法
-				_, errOut, code, _ := runShRaw(ctx, "sh -n <<'__EOS__'\n"+script+"\n__EOS__\n",
+				_, errOut, code, _ := runShRaw(ctx, deps, "sh -n <<'__EOS__'\n"+script+"\n__EOS__\n",
 					"", 10*time.Second)
 				if code != 0 {
 					return errFail("SYNTAX_ERROR", errOut), nil
 				}
 				return ok(map[string]any{"valid": true}), nil
 			}
+			if in.Action != "run" {
+				return errFail("UNKNOWN_ACTION", in.Action), nil
+			}
 
 			if in.TimeoutMs <= 0 {
-				in.TimeoutMs = 120000
+				in.TimeoutMs = int(shellTimeout(deps) / time.Millisecond)
 			}
 
 			var finalScript string
@@ -174,7 +173,7 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 				finalScript = script
 			}
 
-			out, errOut, code, err := runShRaw(ctx, finalScript, in.Stdin,
+			out, errOut, code, err := runShRaw(ctx, deps, finalScript, in.Stdin,
 				time.Duration(in.TimeoutMs)*time.Millisecond)
 			if err != nil {
 				return errFail("EXEC_FAILED", err.Error()), nil

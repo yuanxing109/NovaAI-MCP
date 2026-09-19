@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
-var mu sync.RWMutex
-var current *Config
-
+// Load 读取并校验配置。
+//
+// 配置不支持热重载：进程启动时加载一次，改动需要重启 daemon。
+// 这里刻意不保留"当前配置"的全局副本 —— 曾经有一份 current/Set/Current
+// 三元组，但没有任何调用方，只会让人误以为改配置能即时生效。
 func Load(path string) (*Config, error) {
-	mu.Lock()
-	defer mu.Unlock()
-
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -38,7 +36,6 @@ func Load(path string) (*Config, error) {
 	if err := Validate(&cfg); err != nil {
 		return nil, err
 	}
-	current = &cfg
 	return &cfg, nil
 }
 
@@ -56,18 +53,6 @@ func WriteAtomic(path string, cfg *Config) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-func Current() *Config {
-	mu.RLock()
-	defer mu.RUnlock()
-	return current
-}
-
-func Set(c *Config) {
-	mu.Lock()
-	defer mu.Unlock()
-	current = c
 }
 
 func Validate(cfg *Config) error {

@@ -17,9 +17,21 @@ import (
 	"github.com/novaai/novaai-mcp/internal/util"
 )
 
+// shellTimeout 返回 limits.shellTimeoutSeconds 对应的默认超时。
+//
+// 这是 shell 系执行"未显式指定超时"时的唯一默认值来源。不要在调用点
+// 另写 60*time.Second —— 那样配置项就变成了摆设。
+func shellTimeout(deps *Deps) time.Duration {
+	sec := 60
+	if deps != nil && deps.Config != nil && deps.Config.Limits.ShellTimeoutSec > 0 {
+		sec = deps.Config.Limits.ShellTimeoutSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
 func runCmd(ctx context.Context, deps *Deps, tool, name string, args []string, timeout time.Duration) (stdout, stderr string, code int, err error) {
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = shellTimeout(deps)
 	}
 
 	finalArgs := deps.Adapter.Preprocess(tool, name, args)
@@ -54,7 +66,7 @@ func runCmd(ctx context.Context, deps *Deps, tool, name string, args []string, t
 
 func runSh(ctx context.Context, deps *Deps, tool, script string, timeout time.Duration) (string, string, int, error) {
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = shellTimeout(deps)
 	}
 
 	// 命令拦截检查
@@ -90,9 +102,11 @@ func runSh(ctx context.Context, deps *Deps, tool, script string, timeout time.Du
 // runShRaw 直接执行 /system/bin/sh -c，不经过 Adapter。
 // 硬性规定：shell/script 工具使用本函数，Adapter.Preprocess 不得介入。
 // 所有裸 shell 入口都必须过 antibrick 拦截，这是唯一的收口点。
-func runShRaw(ctx context.Context, script, stdin string, timeout time.Duration) (string, string, int, error) {
+//
+// deps 只用于取配置里的默认超时，不得用它访问 Adapter。
+func runShRaw(ctx context.Context, deps *Deps, script, stdin string, timeout time.Duration) (string, string, int, error) {
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = shellTimeout(deps)
 	}
 
 	// 命令拦截检查
@@ -172,32 +186,6 @@ func suPrefix() string {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
-	}
-	return ""
-}
-
-func asInt(v any) int {
-	switch x := v.(type) {
-	case int:
-		return x
-	case int64:
-		return int(x)
-	case float64:
-		return int(x)
-	}
-	return 0
-}
-
-func asBool(v any) bool {
-	if b, ok := v.(bool); ok {
-		return b
-	}
-	return false
-}
-
-func asString(v any) string {
-	if s, ok := v.(string); ok {
-		return s
 	}
 	return ""
 }

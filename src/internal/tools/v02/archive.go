@@ -19,7 +19,6 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 			"source":      arrProp("源路径"),
 			"destination": strProp("目标路径"),
 			"overwrite":   boolProp("覆盖已存在"),
-			"background":  boolProp("后台执行"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -100,9 +99,9 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- download ----
-	reg("novaai_download", "下载", "可重试、续传、批量下载及状态/取消",
+	reg("novaai_download", "下载", "下载文件，支持重试、断点续传与 SHA-256 校验",
 		objSchema(map[string]any{
-			"action":      enumProp("操作", "start", "batch", "status", "cancel"),
+			"action":      enumProp("操作", "start"),
 			"url":         strProp("URL"),
 			"destination": strProp("目标路径"),
 			"headers":     map[string]any{"type": "object"},
@@ -110,8 +109,6 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 			"retries":     intProp("重试次数"),
 			"resume":      boolProp("断点续传"),
 			"timeoutMs":   intProp("超时毫秒"),
-			"background":  boolProp("后台"),
-			"items":       map[string]any{"type": "array"},
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -184,8 +181,6 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 					"bytes":  size,
 					"sha256": actualSHA,
 				}), nil
-			case "status", "cancel", "batch":
-				return errFail("NOT_IMPLEMENTED", "批量/状态/取消见 task 系统"), nil
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
@@ -279,26 +274,22 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- transfer_export ----
-	reg("novaai_transfer_export", "导出", "将文件、目录或任务产物导出到临时下载地址",
+	//
+	// 只做一件事：把源路径复制到目标路径。没有"任务产物"这个概念 ——
+	// 早期版本声明了 task 动作和 taskId/artifactIndex 参数，但服务里
+	// 根本没有任务系统，它们永远不可能有值。
+	reg("novaai_transfer_export", "导出", "把文件或目录复制到指定路径",
 		objSchema(map[string]any{
-			"action":        enumProp("操作", "file", "directory", "task"),
-			"path":          strProp("文件或目录路径"),
-			"taskId":        strProp("任务 ID"),
-			"artifactIndex": intProp("产物索引"),
-			"destination":   strProp("目标路径"),
-			"background":    boolProp("后台"),
-		}, "action"),
+			"path":        strProp("文件或目录路径"),
+			"destination": strProp("目标路径"),
+		}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action        string `json:"action"`
-				Path          string `json:"path"`
-				TaskID        string `json:"taskId"`
-				ArtifactIndex int    `json:"artifactIndex"`
-				Destination   string `json:"destination"`
+				Path        string `json:"path"`
+				Destination string `json:"destination"`
 			}
 			_ = json.Unmarshal(args, &in)
 
-			// 简化：把源路径原子复制到 workspace/export 下，返回路径
 			src := resolvePath(deps, in.Path)
 			dst := in.Destination
 			if dst == "" {

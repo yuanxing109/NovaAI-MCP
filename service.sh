@@ -26,7 +26,7 @@ done
 umask 077
 zcr_prepare_internal || exit 0
 
-zcr_start_supervisor auto >/dev/null 2>&1 &
+zcr_start_supervisor >/dev/null 2>&1 &
 
 # 看门狗循环：60s 巡检，3 次失败重启
 (
@@ -37,10 +37,11 @@ zcr_start_supervisor auto >/dev/null 2>&1 &
   while true; do
     sleep 60
 
+    # zcr_read_pid 已校验进程身份，非空即代表 daemon 活着
     pid="$(zcr_read_pid 2>/dev/null)"
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-      zcr_log "watchdog: supervisor 已退出，重启"
-      zcr_start_supervisor auto >/dev/null 2>&1 &
+    if [ -z "$pid" ]; then
+      zcr_log "watchdog: daemon 未运行，重启"
+      zcr_start_supervisor >/dev/null 2>&1 &
       sleep 5
       fail_count=0
       continue
@@ -76,7 +77,7 @@ zcr_start_supervisor auto >/dev/null 2>&1 &
         zcr_log "watchdog: 连续 3 次健康检查失败，重启"
         zcr_stop_supervisor
         sleep 2
-        zcr_start_supervisor auto >/dev/null 2>&1 &
+        zcr_start_supervisor >/dev/null 2>&1 &
         fail_count=0
       fi
     fi

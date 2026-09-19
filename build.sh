@@ -18,9 +18,15 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="$ROOT_DIR/src"
 BIN_DIR="$ROOT_DIR/bin"
 DIST_DIR="$ROOT_DIR/dist"
-MODULE_NAME="NovaAI-MCP-v0.05"
 
-VERSION="0.05"
+# 版本号唯一来源是 module.prop，与 customize.sh / action.sh / build.ps1 一致。
+VERSION="$(sed -n 's/^version=//p' "$ROOT_DIR/module.prop" 2>/dev/null | head -n1)"
+if [ -z "$VERSION" ]; then
+  echo "错误: 无法从 module.prop 读取 version"
+  exit 1
+fi
+MODULE_NAME="NovaAI-MCP-v$VERSION"
+
 COMMIT="$(cd "$SRC_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 LDFLAGS="-s -w -X main.Version=$VERSION -X main.Commit=$COMMIT"
 
@@ -76,8 +82,11 @@ build_zip() {
   cp "$ROOT_DIR/common.sh" "$STAGE/"
   cp "$ROOT_DIR/sepolicy.rule" "$STAGE/"
 
-  # 随模块附带文档，便于在设备上离线查阅配置说明
+  # 随模块附带文档，便于在设备上离线查阅配置说明。
+  # LICENSE 必须随包分发：MIT 要求版权与许可声明随软件副本一同提供，
+  # 而本 ZIP 就是一份副本。
   cp "$ROOT_DIR/README.md" "$STAGE/"
+  cp "$ROOT_DIR/LICENSE" "$STAGE/"
   if [ -d "$ROOT_DIR/docs" ]; then
     mkdir -p "$STAGE/docs"
     cp "$ROOT_DIR/docs/"* "$STAGE/docs/"
@@ -90,7 +99,8 @@ build_zip() {
 
   # customize.sh 在安装时还会用到下面这些内容，必须一起打进模块：
   #   bin/<abi>/7zz        按 ABI 分发的 7zz
-  #   bin/tools/*.jar      安装到状态目录的 apktool/smali/baksmali
+  #   bin/tools/*.jar      随模块分发的 apktool/smali/baksmali
+  #                        （wrapper 与 daemon 都直接读模块内这一份，不再复制到状态目录）
   #   bin/wrappers/*       安装到 PATH 的 wrapper（apktool/jadx/smali/baksmali/dexdump/sqlite3）
   #   skills/*.md          安装到状态目录的技能文件
   for arch in arm64-v8a armeabi-v7a x86_64; do
@@ -112,6 +122,13 @@ build_zip() {
   fi
 
   chmod 0755 "$STAGE"/*.sh "$STAGE"/bin/*/novaaimcpd
+  # 7zz 也必须 0755：build.ps1 的 Test-Executable / Test-Package 会断言这一点，
+  # 而旧实现漏了它，于是 Linux 检出上跑 build.sh 产出的包会被 Windows 侧
+  # 校验器判为失败（git 索引里它是 100644，本机 core.fileMode=false）。
+  # 见 docs/KNOWN_ISSUES.md。
+  for f in "$STAGE"/bin/*/7zz; do
+    if [ -f "$f" ]; then chmod 0755 "$f"; fi
+  done
   if [ -d "$STAGE/bin/wrappers" ]; then
     chmod 0755 "$STAGE"/bin/wrappers/*
   fi

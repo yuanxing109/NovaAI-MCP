@@ -10,18 +10,16 @@ import (
 
 func registerAppTools(reg RegisterFn, deps *Deps) {
 	// ---- app_list ----
-	reg("novaai_app_list", "应用列表", "按显示名或包名查询普通、系统或指定用户应用",
+	reg("novaai_app_list", "应用列表", "按包名查询普通、系统或指定用户应用",
 		objSchema(map[string]any{
-			"action": enumProp("操作", "list"),
 			"query":  strProp("搜索关键词"),
 			"system": boolProp("仅系统应用"),
 			"limit":  intProp("返回上限"),
 			"offset": intProp("分页偏移"),
 			"user":   intProp("Android 用户 ID"),
-		}, "action"),
+		}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action string `json:"action"`
 				Query  string `json:"query"`
 				System bool   `json:"system"`
 				Limit  int    `json:"limit"`
@@ -132,38 +130,33 @@ func registerAppTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- app_install ----
-	reg("novaai_app_install", "安装应用", "通过 Package Manager 安装 APK/Split/APKS/XAPK",
+	// 只支持"从本地 APK 路径安装"这一条通路：pm install 单文件。
+	// 早期版本声明了 action(apk/split/apks/xapk/session)、package 与
+	// background，但 handler 一个都不读 —— 那些是承诺了不存在的安装模式。
+	// 多 APK / Split 安装需要 pm install-create|install-write|install-commit
+	// 三段式，属于未实现能力，不该出现在 schema 里。
+	reg("novaai_app_install", "安装应用", "通过 Package Manager 安装本地 APK",
 		objSchema(map[string]any{
-			"action":                  enumProp("操作", "apk", "split", "apks", "xapk", "session"),
 			"path":                    strProp("APK 路径"),
-			"paths":                   arrProp("多 APK 路径"),
-			"package":                 strProp("包名"),
 			"downgrade":               boolProp("允许降级"),
 			"replace":                 boolProp("替换安装"),
 			"grantRuntimePermissions": boolProp("自动授权"),
 			"user":                    intProp("用户 ID"),
-			"background":              boolProp("后台"),
-		}, "action"),
+		}, "path"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action    string   `json:"action"`
-				Path      string   `json:"path"`
-				Paths     []string `json:"paths"`
-				Downgrade bool     `json:"downgrade"`
-				Replace   bool     `json:"replace"`
-				Grant     bool     `json:"grantRuntimePermissions"`
-				User      int      `json:"user"`
+				Path      string `json:"path"`
+				Downgrade bool   `json:"downgrade"`
+				Replace   bool   `json:"replace"`
+				Grant     bool   `json:"grantRuntimePermissions"`
+				User      int    `json:"user"`
 			}
 			_ = json.Unmarshal(args, &in)
 
-			var apkPath string
-			if in.Path != "" {
-				apkPath = resolvePath(deps, in.Path)
-			} else if len(in.Paths) > 0 {
-				apkPath = resolvePath(deps, in.Paths[0])
-			} else {
+			if in.Path == "" {
 				return errFail("MISSING_PATH", "path 必填"), nil
 			}
+			apkPath := resolvePath(deps, in.Path)
 
 			args2 := []string{"install"}
 			if in.Replace {
@@ -301,16 +294,16 @@ func registerAppTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- app_export ----
-	reg("novaai_app_export", "导出应用", "导出 APK、Split 或应用包",
+	// 只导出 pm path 给出的主 APK。早期版本声明了 action(apk/splits/bundle)，
+	// 但 handler 不读 action，也不处理 split / bundle 分支。
+	reg("novaai_app_export", "导出应用", "导出应用主 APK 到指定路径",
 		objSchema(map[string]any{
-			"action":      enumProp("操作", "apk", "splits", "bundle"),
 			"package":     strProp("包名"),
 			"destination": strProp("目标路径"),
 			"user":        intProp("用户 ID"),
-		}, "action", "package"),
+		}, "package"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
-				Action      string `json:"action"`
 				Package     string `json:"package"`
 				Destination string `json:"destination"`
 				User        int    `json:"user"`
@@ -386,6 +379,11 @@ func registerAppTools(reg RegisterFn, deps *Deps) {
 				} else {
 					cmd = []string{"cmd", "deviceidle", "whitelist", "-" + in.Package}
 				}
+			default:
+				// 兜底必须留在 switch 内部：下面直接索引 cmd[0]，
+				// 未知 action 让 cmd 为空切片会 panic（被 safeCall 兜成
+				// "工具内部 panic"，看不出真正原因）。
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_app_policy",
@@ -431,6 +429,8 @@ func registerAppTools(reg RegisterFn, deps *Deps) {
 				cmd = []string{"cmd", "role", "add-role-holder", in.Role, target}
 			case "clear":
 				cmd = []string{"cmd", "role", "remove-role-holder", in.Role, in.Package}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_default_app",
@@ -474,6 +474,8 @@ func registerAppTools(reg RegisterFn, deps *Deps) {
 				cmd = []string{"cmd", "notification", "disallow_listener", in.Component}
 			case "listener":
 				cmd = []string{"settings", "get", "secure", "enabled_notification_listeners"}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_notification",

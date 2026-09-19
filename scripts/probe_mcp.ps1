@@ -1,17 +1,22 @@
 # NovaAI-MCP 协议合规回归测试
 #
-# 用法（先手动启动 daemon，或指向设备上已运行的服务）：
+# 默认自举：脚本自行构建 daemon、生成隔离 state 目录并在结束时清理，不依赖设备。
+#   pwsh -File scripts/probe_mcp.ps1
+#
+# 也可指向外部已在运行的服务（例如设备上的实例）：
 #   pwsh -File scripts/probe_mcp.ps1 -Port 5322 -Token (Get-Content /path/to/token -Raw).Trim()
 #
 # 覆盖：initialize 协商、通知无响应、tools/list、tools/call 的 MCP content 包装、
 #       未知工具错误码、批量请求、鉴权、DNS rebinding（Host 校验）、Origin 校验、
-#       限流、会话复用。
+#       限流、会话复用、profile 门禁、pathguard。
 
 param(
   [int]$Port = 15322,
   [string]$Token = '',
   [string]$HostName = '127.0.0.1',
-  [int]$ExpectTools = 62
+  [int]$ExpectTools = 61,
+  [string]$StateDir = "$env:TEMP\nova-mcp-probe",
+  [string]$GoExe = 'go'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +27,43 @@ function Check($name, $cond, $detail) {
   if ($cond) { $script:pass++; Write-Host ("  PASS  {0}" -f $name) }
   else { $script:fail++; Write-Host ("  FAIL  {0}  -> {1}" -f $name, $detail) }
 }
+
+# ---- 自举：未提供 -Token 时自行构建并启动一个隔离 daemon ----
+# 提供 -Token 时按"外部已在运行的服务"处理，不做构建与清理。
+$root = Split-Path -Parent $PSScriptRoot
+$proc = $null
+if (-not $Token) {
+  $exe = Join-Path $env:TEMP 'novaaimcpd_mcpprobe.exe'
+  Push-Location (Join-Path $root 'src')
+  & $GoExe build -o $exe ./cmd/novaaimcpd
+  if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host 'BUILD FAILED'; exit 1 }
+  Pop-Location
+
+  if (Test-Path $StateDir) { Remove-Item -Recurse -Force $StateDir }
+  New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+
+  # 先跑一次让 daemon 生成默认 config.json，改掉端口后再正式启动。
+  $p0 = Start-Process -FilePath $exe -ArgumentList @('-state', $StateDir) `
+    -RedirectStandardOutput "$StateDir\boot1.log" -RedirectStandardError "$StateDir\boot1.err" `
+    -PassThru -WindowStyle Hidden
+  Start-Sleep -Seconds 2
+  Stop-Process -Id $p0.Id -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+
+  $cfgPath = Join-Path $StateDir 'config.json'
+  if (-not (Test-Path $cfgPath)) { Write-Host "配置未生成: $cfgPath"; exit 1 }
+  $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+  $cfg.network.port = $Port
+  $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath -Encoding UTF8
+
+  $proc = Start-Process -FilePath $exe -ArgumentList @('-state', $StateDir) `
+    -RedirectStandardOutput "$StateDir\boot2.log" -RedirectStandardError "$StateDir\boot2.err" `
+    -PassThru -WindowStyle Hidden
+  Start-Sleep -Seconds 2
+  $Token = (Get-Content (Join-Path $StateDir 'token') -Raw).Trim()
+}
+
+try {
 
 $client = New-Object System.Net.Http.HttpClient
 $client.Timeout = [TimeSpan]::FromSeconds(30)
@@ -111,7 +153,7 @@ Write-Host "`n[11] profile 权限校验"
 $r = Send '{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"novaai_config","arguments":{"action":"get"}}}' $h2
 $j = $r.Body | ConvertFrom-Json
 Check 'default 拒绝 novaai_config (-32003)' ($j.error.code -eq -32003) $r.Body
-$r = Send '{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"novaai_shell","arguments":{"action":"exec","command":"id"}}}' $h2
+$r = Send '{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"novaai_shell","arguments":{"command":"id"}}}' $h2
 $j = $r.Body | ConvertFrom-Json
 Check 'default 拒绝 novaai_shell (-32003)' ($j.error.code -eq -32003) $r.Body
 $r = Send '{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"novaai_auth_status","arguments":{}}}' $h2
@@ -141,6 +183,13 @@ $r = Send '{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"nova
 $j = $r.Body | ConvertFrom-Json
 $txt = ($j.result.content | Select-Object -First 1).text
 Check 'fs_manage 放行 /data/local/tmp 下删除' ($txt -notmatch 'PROTECTED_PATH') $r.Body
+
+} finally {
+  if ($proc) {
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+  }
+}
 
 Write-Host "`n==================== 结果 ===================="
 Write-Host "PASS=$pass  FAIL=$fail"

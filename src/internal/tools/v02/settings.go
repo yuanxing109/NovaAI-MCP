@@ -50,6 +50,10 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				cmd = []string{"wm", "density", in.Value}
 			case "rotation":
 				cmd = []string{"settings", "put", "system", "user_rotation", in.Value}
+			default:
+				// 兜底必须在 switch 内：下面直接索引 cmd[0]，
+				// 未知 action 让 cmd 为空切片会 panic。
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_display",
@@ -67,9 +71,9 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 		})
 
 	// ---- audio ----
-	reg("novaai_audio", "音频设置", "读取或调整音量、静音与音频路由",
+	reg("novaai_audio", "音频设置", "读取或调整音量与静音",
 		objSchema(map[string]any{
-			"action": enumProp("操作", "get", "volume", "mute", "route"),
+			"action": enumProp("操作", "get", "volume", "mute"),
 			"stream": intProp("音频流编号"),
 			"level":  intProp("音量级别"),
 			"muted":  boolProp("是否静音"),
@@ -99,8 +103,8 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				} else {
 					cmd = []string{"media", "volume", "--set", "10", "--stream", fmt.Sprint(in.Stream)}
 				}
-			case "route":
-				return errFail("NOT_IMPLEMENTED", "音频路由控制需 ROM 支持"), nil
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_audio",
@@ -164,6 +168,8 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				} else {
 					cmd = []string{"svc", "nfc", "disable"}
 				}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_connectivity",
@@ -207,6 +213,8 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				cmd = []string{"setprop", "persist.sys.timezone", in.Timezone}
 			case "time_format":
 				cmd = []string{"settings", "put", "system", "time_12_24", in.Value}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_locale_time",
@@ -250,6 +258,8 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				cmd = []string{"ime", "enable", in.Component}
 			case "disable":
 				cmd = []string{"ime", "disable", in.Component}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_input_method",
@@ -311,6 +321,8 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 				} else {
 					cmd = []string{"appops", "set", "android", "android:mock_location", "deny"}
 				}
+			default:
+				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
 
 			out, errOut, code, err := runCmd(ctx, deps, "novaai_developer",
@@ -363,9 +375,6 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 			default:
 				return errFail("UNKNOWN_ACTION", in.Action), nil
 			}
-			if len(cmd) == 0 {
-				return errFail("UNKNOWN_ACTION", in.Action), nil
-			}
 
 			if in.DelayMs > 0 {
 				time.Sleep(time.Duration(in.DelayMs) * time.Millisecond)
@@ -382,11 +391,10 @@ func registerSettingTools(reg RegisterFn, deps *Deps) {
 	// ---- screen ----
 	reg("novaai_screen", "屏幕操作", "截图、录屏、前台 Activity、唤醒或休眠",
 		objSchema(map[string]any{
-			"action":     enumProp("操作", "screenshot", "record", "foreground", "wake", "sleep"),
-			"path":       strProp("输出路径"),
-			"seconds":    intProp("录屏秒数"),
-			"bitRate":    intProp("码率"),
-			"background": boolProp("后台"),
+			"action":  enumProp("操作", "screenshot", "record", "foreground", "wake", "sleep"),
+			"path":    strProp("输出路径"),
+			"seconds": intProp("录屏秒数"),
+			"bitRate": intProp("码率"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {

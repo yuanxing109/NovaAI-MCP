@@ -14,54 +14,28 @@
     "allowedOrigins": []
   },
 
-  "_comment_paths": "路径配置",
+  "_comment_paths": "路径配置。子目录不再单独配置：stateDir 就是那个旋钮",
   "paths": {
     "_comment_stateDir": "状态目录（配置、日志、审计等）",
     "stateDir": "/data/adb/novaai-mcp",
     "_comment_workDir": "工作目录（用户数据）",
     "workDir": "/storage/emulated/0/novaaiAI",
-    "_comment_workspaceRoot": "工作空间根目录",
+    "_comment_workspaceRoot": "工作空间根目录（相对路径的解析基准）",
     "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-    "_comment_downloadsDir": "下载目录",
-    "downloadsDir": "/data/adb/novaai-mcp/downloads",
-    "_comment_uploadsDir": "上传目录",
-    "uploadsDir": "/data/adb/novaai-mcp/uploads",
-    "_comment_artifactsDir": "产物目录",
-    "artifactsDir": "/data/adb/novaai-mcp/artifacts",
-    "_comment_tempDir": "临时目录",
-    "tempDir": "/data/adb/novaai-mcp/tmp",
-    "_comment_auditDir": "审计日志目录",
-    "auditDir": "/data/adb/novaai-mcp/audit",
-    "_comment_crashDir": "崩溃转储目录",
-    "crashDir": "/data/adb/novaai-mcp/crash"
+    "_comment_auditDir": "审计日志目录（崩溃转储固定为 {stateDir}/crash，不可配置）",
+    "auditDir": "/data/adb/novaai-mcp/audit"
   },
 
   "_comment_limits": "限制配置",
   "limits": {
-    "_comment_maxConnections": "最大并发连接数",
-    "maxConnections": 128,
-    "_comment_maxRequestBytes": "最大请求体大小 (64MB)",
+    "_comment_maxRequestBytes": "最大请求体大小 (64MB)，超限返回 -32600",
     "maxRequestBytes": 67108864,
-    "_comment_totalTasks": "最大任务数",
-    "totalTasks": 16,
-    "_comment_heavyTasks": "最大重任务数",
-    "heavyTasks": 2,
-    "_comment_shellTimeoutSeconds": "Shell 命令超时时间（秒）",
+    "_comment_shellTimeoutSeconds": "shell/script 未显式指定 timeoutMs 时的默认超时（秒）",
     "shellTimeoutSeconds": 60,
-    "_comment_transferChunkBytes": "传输分块大小 (1MB)",
-    "transferChunkBytes": 1048576,
-    "_comment_transferMaxBytes": "最大传输大小 (1GB)",
-    "transferMaxBytes": 1073741824,
-    "_comment_resultPreviewBytes": "结果预览大小 (256KB)",
-    "resultPreviewBytes": 262144,
-    "_comment_artifactTtlSeconds": "产物保留时间 (7天)",
-    "artifactTtlSeconds": 604800,
+    "_comment_resultPreviewBytes": "单个工具结果的字节上限 (1MB)，超限截断并丢弃 structuredContent",
+    "resultPreviewBytes": 1048576,
     "_comment_shutdownGraceSeconds": "优雅关闭等待时间（秒）",
-    "shutdownGraceSeconds": 30,
-    "_comment_uploadIdleTtlSeconds": "上传空闲超时 (30分钟)",
-    "uploadIdleTtlSeconds": 1800,
-    "_comment_downloadRetryAttempts": "下载重试次数",
-    "downloadRetryAttempts": 3
+    "shutdownGraceSeconds": 30
   },
 
   "_comment_security": "安全配置",
@@ -95,8 +69,6 @@
       "path": "/data/adb/novaai-mcp/mcp.sock",
       "_comment_mode": "Socket 文件权限",
       "mode": "0660",
-      "_comment_group": "Socket 文件所属组",
-      "group": "shell",
       "_comment_sepolicyInject": "是否注入 SELinux 策略",
       "sepolicyInject": true
     },
@@ -115,8 +87,8 @@
     "default": {
       "_comment_allowTools": "允许的工具（* 表示全部）",
       "allowTools": ["*"],
-      "_comment_denyTools": "拒绝的工具；通用 shell 是万能绕过，默认交给 agent_full",
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_config",
+      "_comment_denyTools": "拒绝的工具；通用 shell 是万能绕过，默认交给 agent_full。novaai_schedule 是同类载体（create 写脚本 + run 执行），必须一起挡",
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_config",
                     "novaai_root_module", "novaai_systemless"],
       "_comment_riskCeiling": "允许的最高风险等级 (0=只读, 1=普通写, 2=修改状态, 3=破坏性)",
       "riskCeiling": 3
@@ -129,7 +101,7 @@
     },
     "reverse": {
       "allowTools": ["novaai_reverse_*", "novaai_hook_*", "novaai_fs_read", "novaai_fs_info"],
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_power"],
+      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_power"],
       "riskCeiling": 3
     },
     "agent_full": {
@@ -147,7 +119,7 @@
     "fallback": "default"
   },
 
-  "_comment_audit": "审计配置",
+  "_comment_audit": "审计配置。只有 allowlist 一种脱敏实现，没有可关闭脱敏的开关",
   "audit": {
     "_comment_enabled": "是否启用审计",
     "enabled": true,
@@ -161,9 +133,7 @@
     "includeArgs": true,
     "_comment_argPreviewBytes": "参数预览最大字节数",
     "argPreviewBytes": 256,
-    "_comment_redactMode": "脱敏模式 (allowlist/all/none)",
-    "redactMode": "allowlist",
-    "_comment_allowlistFields": "允许记录的字段列表",
+    "_comment_allowlistFields": "允许记录的字段列表（其余字段一律脱敏）",
     "allowlistFields": ["action", "path", "package", "name", "query", "url", "tool", "pattern", "cmd", "command"]
   },
 
@@ -171,16 +141,12 @@
   "rateLimit": {
     "_comment_global": "全局限制 (QPS, 突发)",
     "global": {"qps": 50, "burst": 100},
-    "_comment_perSession": "每会话限制",
+    "_comment_perSession": "第二层限制，按客户端身份（token 哈希）计数，不是按 Mcp-Session-Id",
     "perSession": {
       "qps": 20,
       "burst": 40,
-      "_comment_maxConcurrentTools": "最大并发工具数",
-      "maxConcurrentTools": 5,
-      "_comment_totalUploadBytes": "总上传字节数限制 (5GB)",
-      "totalUploadBytes": 5368709120,
-      "_comment_totalDownloadBytes": "总下载字节数限制 (5GB)",
-      "totalDownloadBytes": 5368709120
+      "_comment_maxConcurrentTools": "同一客户端的最大并发工具数",
+      "maxConcurrentTools": 5
     },
     "_comment_perTool": "每工具限制",
     "perTool": {
@@ -188,7 +154,7 @@
     }
   },
 
-  "_comment_session": "会话配置",
+  "_comment_session": "会话配置。只有带 Mcp-Session-Id 或 initialize 的请求会占用会话名额",
   "session": {
     "_comment_idleTimeoutSeconds": "会话空闲超时 (30分钟)",
     "idleTimeoutSeconds": 1800,
@@ -196,14 +162,6 @@
     "maxSessions": 32,
     "_comment_sweepIntervalSeconds": "清理间隔 (5分钟)",
     "sweepIntervalSeconds": 300
-  },
-
-  "_comment_skill": "技能配置",
-  "skill": {
-    "_comment_learnFromRiskOps": "是否从高风险操作学习技能",
-    "learnFromRiskOps": false,
-    "_comment_maxLearnedSkills": "最大学习技能数",
-    "maxLearnedSkills": 200
   },
 
   "_comment_uninstall": "卸载配置（由 uninstall.sh 读取，默认全部 false 即不删任何数据）",
@@ -216,8 +174,5 @@
     "purgeCrashDumps": false,
     "_comment_purgeUserData": "卸载时是否清理用户数据目录 /storage/emulated/0/novaaiAI",
     "purgeUserData": false
-  },
-
-  "_comment_capabilities": "能力配置（保留字段）",
-  "capabilities": {}
+  }
 }

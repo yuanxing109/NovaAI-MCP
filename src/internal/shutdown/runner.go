@@ -74,8 +74,6 @@ func (r *Runner) Start(handler http.Handler) {
 }
 
 func (r *Runner) GracefulShutdown() {
-	r.server.BroadcastShutdown()
-
 	time.Sleep(2 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(),

@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime/debug"
-	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/novaai/novaai-mcp/internal/audit"
 	"github.com/novaai/novaai-mcp/internal/config"
 	"github.com/novaai/novaai-mcp/internal/profile"
 	"github.com/novaai/novaai-mcp/internal/ratelimit"
-	"github.com/novaai/novaai-mcp/internal/session"
 	"github.com/novaai/novaai-mcp/internal/tools"
 )
 
@@ -28,20 +27,26 @@ type ServerConfig struct {
 	Config    *config.Config
 	Registry  *tools.Registry
 	Audit     *audit.Logger
-	Sessions  *session.Manager
 	RateLimit *ratelimit.Limiter
 	Deps      *tools.Deps
 }
 
-type Server struct {
-	cfg      *ServerConfig
-	mu       sync.RWMutex
-	sseConns map[string]chan SSEEvent
+// Identity 是本次请求的鉴权结果，由中间件解析后传入协议层。
+//
+// 三个字段职责不同，不要混用：
+//   - SessionID：MCP 会话 id，只用于审计与 session_list；无状态请求为空串。
+//   - Profile：本次请求的 token 解析出的 profile，**权限决策的唯一依据**。
+//     不能改读会话上记录的 profile —— 同一个 Mcp-Session-Id 可以被不同
+//     token 复用，那样会让低权限 token 继承高权限会话。
+//   - RateKey：客户端不可伪造的限流身份键（token 哈希），只给限流器用。
+type Identity struct {
+	SessionID string
+	Profile   string
+	RateKey   string
 }
 
-type SSEEvent struct {
-	Type string
-	Data any
+type Server struct {
+	cfg *ServerConfig
 }
 
 type JSONRPCRequest struct {
@@ -81,21 +86,7 @@ type CallToolResult struct {
 }
 
 func NewServer(cfg *ServerConfig) *Server {
-	return &Server{
-		cfg:      cfg,
-		sseConns: make(map[string]chan SSEEvent),
-	}
-}
-
-func (s *Server) BroadcastShutdown() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, ch := range s.sseConns {
-		select {
-		case ch <- SSEEvent{Type: "server_shutting_down", Data: map[string]any{"reason": "graceful"}}:
-		default:
-		}
-	}
+	return &Server{cfg: cfg}
 }
 
 // IsNotification 判断请求是否为 JSON-RPC 通知（无 id）。
@@ -109,7 +100,7 @@ func IsNotification(req *JSONRPCRequest) bool {
 
 // Handle 处理单个 JSON-RPC 请求。
 // 返回 nil 表示这是通知，调用方不应写任何响应。
-func (s *Server) Handle(req *JSONRPCRequest, sessionID string) *JSONRPCResponse {
+func (s *Server) Handle(req *JSONRPCRequest, ident Identity) *JSONRPCResponse {
 	if req.Method == "" {
 		if IsNotification(req) {
 			return nil
@@ -119,11 +110,11 @@ func (s *Server) Handle(req *JSONRPCRequest, sessionID string) *JSONRPCResponse 
 
 	switch req.Method {
 	case "initialize":
-		return s.handleInitialize(req, sessionID)
+		return s.handleInitialize(req, ident.SessionID)
 	case "tools/list":
 		return s.handleToolsList(req)
 	case "tools/call":
-		return s.handleToolsCall(req, sessionID)
+		return s.handleToolsCall(req, ident)
 	case "prompts/list":
 		if IsNotification(req) {
 			return nil
@@ -216,7 +207,7 @@ func (s *Server) handleToolsList(req *JSONRPCRequest) *JSONRPCResponse {
 	}}
 }
 
-func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPCResponse {
+func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -244,12 +235,13 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 	// 这是整个服务唯一的策略收口点：所有工具调用都经由这里，不必在工具内部
 	// 各自加守卫。策略来自配置文件的静态 profile，不做交互式确认 —— 配置一次
 	// 长期生效，避免每次调用都要人工放行。
+	//
+	// profile 取本次请求 token 的解析结果（ident.Profile），不读会话记录：
+	// Mcp-Session-Id 由客户端携带，可以被复用。
 	if s.cfg.Deps != nil && s.cfg.Deps.Profiles != nil {
-		profName := "default"
-		if s.cfg.Sessions != nil {
-			if st, err := s.cfg.Sessions.Get(sessionID); err == nil && st.Profile != "" {
-				profName = st.Profile
-			}
+		profName := ident.Profile
+		if profName == "" {
+			profName = "default"
 		}
 		p := s.cfg.Deps.Profiles.Get(profName)
 		risk := profile.ResolveRisk(params.Name, params.Arguments)
@@ -257,7 +249,7 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 			s.cfg.Audit.Log(audit.Entry{
 				Event:   "profile_denied",
 				Tool:    params.Name,
-				Session: sessionID,
+				Session: ident.SessionID,
 				Profile: profName,
 				Result:  "denied",
 				Detail:  fmt.Sprintf("risk=%d ceiling=%d", risk, p.RiskCeiling),
@@ -271,11 +263,14 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 		}
 	}
 
-	// ---- 限流：全局 / 会话 / 工具 ----
+	// ---- 限流：全局 / 客户端身份 / 工具 ----
+	//
+	// 键用 ident.RateKey（token 哈希）而不是 sessionID：后者是客户端自报的
+	// 请求头，每次换一个就能拿到全新的满额桶，限流会被完全绕过。
 	if s.cfg.RateLimit != nil {
-		if err := s.cfg.RateLimit.Allow(sessionID, params.Name); err != nil {
+		if err := s.cfg.RateLimit.Allow(ident.RateKey, params.Name); err != nil {
 			s.cfg.Audit.Log(audit.Entry{
-				Event: "rate_limited", Tool: params.Name, Session: sessionID,
+				Event: "rate_limited", Tool: params.Name, Session: ident.SessionID,
 				Result: "denied", Detail: err.Error(),
 			})
 			if notify {
@@ -284,14 +279,14 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 			return errorResponse(req.ID, -32009, err.Error())
 		}
 		// ---- 并发槽 ----
-		if !s.cfg.RateLimit.AcquireSlot(sessionID) {
+		if !s.cfg.RateLimit.AcquireSlot(ident.RateKey) {
 			lerr := &ratelimit.LimitError{
 				Scope: ratelimit.ScopeConcurrent,
 				Tool:  params.Name,
 				Limit: s.cfg.RateLimit.ConcurrencyLimit(),
 			}
 			s.cfg.Audit.Log(audit.Entry{
-				Event: "concurrency_limited", Tool: params.Name, Session: sessionID,
+				Event: "concurrency_limited", Tool: params.Name, Session: ident.SessionID,
 				Result: "denied", Detail: lerr.Error(),
 			})
 			if notify {
@@ -299,11 +294,12 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 			}
 			return errorResponse(req.ID, -32010, lerr.Error())
 		}
-		defer s.cfg.RateLimit.ReleaseSlot(sessionID)
+		defer s.cfg.RateLimit.ReleaseSlot(ident.RateKey)
 	}
 
 	ctx := context.Background()
-	ctx = tools.WithSessionID(ctx, sessionID)
+	ctx = tools.WithSessionID(ctx, ident.SessionID)
+	ctx = tools.WithProfile(ctx, ident.Profile)
 	ctx = tools.WithDeps(ctx, s.cfg.Deps)
 
 	start := time.Now()
@@ -313,7 +309,7 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 	entry := audit.Entry{
 		Event:      "tool_call",
 		Tool:       params.Name,
-		Session:    sessionID,
+		Session:    ident.SessionID,
 		DurationMS: elapsed,
 	}
 	if err != nil {
@@ -337,7 +333,16 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, sessionID string) *JSONRPC
 		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID,
 			Result: errorResult(err.Error())}
 	}
-	return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: successResult(result)}
+	return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID,
+		Result: successResult(result, s.resultLimit())}
+}
+
+// resultLimit 返回单个工具结果的字节上限。0 表示不限制。
+func (s *Server) resultLimit() int64 {
+	if s.cfg.Config == nil {
+		return 0
+	}
+	return s.cfg.Config.Limits.ResultPreviewBytes
 }
 
 // safeCall 包住工具 Handler，任何 panic 都转成普通错误，
@@ -353,11 +358,36 @@ func safeCall(ctx context.Context, t *tools.Tool, args json.RawMessage) (result 
 	return t.Handler(ctx, args)
 }
 
-func successResult(v any) CallToolResult {
+// successResult 渲染工具返回值，并按 limits.resultPreviewBytes 截断。
+//
+// 截断必须在这里做：这是所有工具结果的唯一出口。超限时同时丢弃
+// structuredContent —— 只截 content 而保留完整的结构化副本，帧大小
+// 一点没省，还会让两者不一致。
+func successResult(v any, limit int64) CallToolResult {
+	text := toText(v)
+	if limit > 0 && int64(len(text)) > limit {
+		return CallToolResult{
+			Content: []ContentItem{{Type: "text", Text: truncateBytes(text, limit) +
+				fmt.Sprintf("\n\n[结果已截断：原始 %d 字节，上限 %d 字节。请用更精确的参数缩小范围。]",
+					len(text), limit)}},
+		}
+	}
 	return CallToolResult{
-		Content:           []ContentItem{{Type: "text", Text: toText(v)}},
+		Content:           []ContentItem{{Type: "text", Text: text}},
 		StructuredContent: structured(v),
 	}
+}
+
+// truncateBytes 把 s 截到不超过 limit 字节，且不切断 UTF-8 字符。
+func truncateBytes(s string, limit int64) string {
+	if limit <= 0 || int64(len(s)) <= limit {
+		return s
+	}
+	n := int(limit)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func errorResult(msg string) CallToolResult {
