@@ -1,5 +1,12 @@
 #!/bin/bash
-# NovaAI-MCP v0.05 构建脚本
+# NovaAI-MCP v0.05 构建脚本（Unix / Linux / macOS / CI）
+#
+# Windows 上请改用 build.ps1：Windows 通常没有 zip，且 Git 自带的 bsdtar
+# 写出的 zip 不保留 Unix 权限位（实测 0755 被写成 -rw-rw-rw-）。
+# 两者产出同一个模块包。
+#
+# staging 清单在两个脚本里各有一份，改动其中一处必须同步另一处，
+# 否则 Windows 包与 Unix 包内容不一致。见 docs/KNOWN_ISSUES.md。
 
 set -e
 
