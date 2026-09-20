@@ -3,11 +3,19 @@ package audit
 import (
 	"encoding/json"
 	"strings"
-
-	"github.com/novaai/novaai-mcp/internal/config"
 )
 
-func BuildArgsPreview(args json.RawMessage, cfg *config.AuditConfig) any {
+// allowlistFields 是允许原样记录的参数名。其余参数一律脱敏为 "***"。
+//
+// 只有 allowlist 一种脱敏实现，没有可关闭脱敏的开关。
+var allowlistFields = []string{"action", "path", "package", "name",
+	"query", "url", "tool", "pattern", "cmd", "command"}
+
+// argPreviewBytes 是单个参数值的截断长度。
+const argPreviewBytes = 256
+
+// BuildArgsPreview 生成一条脱敏后的参数预览。
+func BuildArgsPreview(args json.RawMessage) any {
 	if len(args) == 0 {
 		return nil
 	}
@@ -18,21 +26,21 @@ func BuildArgsPreview(args json.RawMessage, cfg *config.AuditConfig) any {
 
 	out := map[string]any{}
 	for k, v := range raw {
-		if !isAllowlisted(k, cfg.AllowlistFields) {
+		if !isAllowlisted(k) {
 			out[k] = "***"
 			continue
 		}
 		s := string(v)
-		if len(s) > cfg.ArgPreviewBytes {
-			s = s[:cfg.ArgPreviewBytes] + "..."
+		if len(s) > argPreviewBytes {
+			s = s[:argPreviewBytes] + "..."
 		}
 		out[k] = s
 	}
 	return out
 }
 
-func isAllowlisted(key string, allowlist []string) bool {
-	for _, a := range allowlist {
+func isAllowlisted(key string) bool {
+	for _, a := range allowlistFields {
 		if strings.EqualFold(a, key) {
 			return true
 		}

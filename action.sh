@@ -31,21 +31,13 @@ zcr_print "Android: $(getprop ro.build.version.release) (API $(getprop ro.build.
 zcr_print ""
 zcr_print "MCP 地址: http://127.0.0.1:5322/mcp"
 zcr_print "Unix socket: $ZCR_INTERNAL_DIR/mcp.sock"
-
-# Token
-if [ -f "$ZCR_TOKEN" ]; then
-  token_preview="$(cat "$ZCR_TOKEN" | cut -c1-4)****$(cat "$ZCR_TOKEN" | rev | cut -c1-4 | rev)"
-  zcr_print "Token: $token_preview"
-  zcr_print "Token 文件: $ZCR_TOKEN"
-else
-  zcr_print "Token: 未生成"
-fi
+zcr_print "鉴权: 无（权限边界 = 网络可达性）"
 
 # 配置文件
 if [ -f "$ZCR_CONFIG" ]; then
   zcr_print "配置文件: $ZCR_CONFIG"
-  # 注意：这里只取 config.json 里第一个 "enabled": true，它未必是 LAN 开关
-  # （audit / token 等同名字段会先出现）。所以标签如实写成"首个 enabled"。
+  # 注意：这里只取 config.json 里第一个 "enabled": true，它未必是审计开关
+  # （其他同名字段会先出现）。所以标签如实写成"首个 enabled"。
   first_enabled="$(grep -o '"enabled"[[:space:]]*:[[:space:]]*true' "$ZCR_CONFIG" | head -1 || echo '未知')"
   zcr_print "配置摘要（首个 enabled=true）: ${first_enabled:-未知}"
 fi

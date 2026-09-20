@@ -1,0 +1,293 @@
+/* NovaAI-MCP KernelSU WebUI
+ *
+ * 不引入任何框架：页面运行在 KernelSU 管理器的 WebView 里，
+ * 一次网络请求都可能是失败点，越少依赖越好。
+ *
+ * 配色跟随系统深/浅色（prefers-color-scheme），因为这是设备上的页面，
+ * 不是编辑器里的预览。
+ */
+
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1c1f23;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --accent: #2f6feb;
+  --accent-text: #ffffff;
+  --ok: #1f9d55;
+  --warn: #b7791f;
+  --err: #d64545;
+  --idle: #9aa1ac;
+  --code-bg: #f0f2f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101215;
+    --card: #191c21;
+    --text: #e8eaed;
+    --muted: #9aa1ac;
+    --line: #2a2f37;
+    --accent: #5b8ef7;
+    --accent-text: #0b0d10;
+    --ok: #3ecf7e;
+    --warn: #e2b04a;
+    --err: #ff6b6b;
+    --idle: #6b7280;
+    --code-bg: #0c0e11;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Noto Sans CJK SC", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ---------- 顶栏 ---------- */
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.bar-title { display: flex; align-items: center; gap: 8px; }
+.bar-actions { display: flex; align-items: center; gap: 6px; }
+
+.port {
+  width: 84px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+/* ---------- 状态药丸 ---------- */
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #fff;
+}
+.pill-ok { background: var(--ok); }
+.pill-warn { background: var(--warn); }
+.pill-err { background: var(--err); }
+.pill-idle { background: var(--idle); }
+.pill-unknown { background: var(--idle); }
+
+/* ---------- 标签页 ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+.tab {
+  appearance: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.tab.is-active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--line);
+  font-weight: 600;
+}
+
+/* ---------- 面板 ---------- */
+main { padding: 12px; }
+.panel { display: none; }
+.panel.is-active { display: block; }
+
+.cards { display: flex; flex-direction: column; gap: 10px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+}
+.card > summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+}
+.card > summary::-webkit-details-marker { display: none; }
+.card[open] > summary { margin-bottom: 10px; }
+
+/* ---------- 上游条目 ---------- */
+.up-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.up-name { font-weight: 600; }
+.up-target {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+  flex: 1 1 100%;
+}
+.up-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+
+/* ---------- 表单 ---------- */
+.form { display: flex; flex-direction: column; gap: 10px; }
+.form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.form input, .form select, .form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.form textarea {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+.form .check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.form .check input { width: auto; }
+.form-actions { display: flex; gap: 8px; }
+
+.hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+.muted { color: var(--muted); }
+.is-hidden { display: none !important; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.btn:disabled { opacity: .5; cursor: default; }
+.btn-primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.btn-ghost { background: transparent; }
+.btn-danger { color: var(--err); border-color: var(--err); }
+
+/* ---------- 工具目录 ---------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.search {
+  flex: 1 1 160px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tool-name {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.tool-desc { font-size: 13px; color: var(--muted); }
+.tool-src { font-size: 12px; color: var(--muted); }
+
+.group-title {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+/* ---------- 结果与日志 ---------- */
+.result {
+  margin: 10px 0 0;
+  padding: 10px;
+  max-height: 50vh;
+  overflow: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- 横幅与提示 ---------- */
+.banner {
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--err);
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  font-size: 13px;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: 90vw;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 13px;
+  z-index: 100;
+  white-space: pre-wrap;
+}
+
+.foot { padding: 12px; }
+.foot .muted { font-size: 12px; }
+
+code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--code-bg);
+  padding: 1px 4px;
+  border-radius: 4px;
+}

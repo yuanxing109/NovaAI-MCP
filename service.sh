@@ -32,7 +32,6 @@ zcr_start_supervisor >/dev/null 2>&1 &
 (
   fail_count=0
   PORT=5322
-  TOKEN_FILE="/data/adb/novaai-mcp/token"
 
   while true; do
     sleep 60
@@ -54,13 +53,11 @@ zcr_start_supervisor >/dev/null 2>&1 &
     # 设备上恒定探测失败，每 3 分钟就杀掉并重启一次 daemon。
     # timeout 同理：缺失时 zcr_with_timeout 退化为无超时执行。
     if command -v curl >/dev/null 2>&1; then
-      # 注意：loopback 默认也需要 token（security.anonymous=false）
-      tok="$(cat "$TOKEN_FILE" 2>/dev/null)"
+      # 无鉴权：不带任何认证头即可通过 hostMiddleware（Host 是 IP 字面量）。
       code=$(zcr_with_timeout 5 curl -s -o /dev/null -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/mcp" \
         -H "Content-Type: application/json" \
         -H "Accept: application/json" \
-        -H "Authorization: Bearer $tok" \
         -d '{"jsonrpc":"2.0","id":1,"method":"ping"}' 2>/dev/null)
       [ "$code" = "200" ] && healthy=1 || healthy=0
     elif command -v nc >/dev/null 2>&1; then

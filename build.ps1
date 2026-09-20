@@ -218,6 +218,20 @@ function Build-ModuleZip {
             Copy-Item -Path (Join-Path $skillsSrc '*.md') -Destination $skillsDst
         }
 
+        # WebUI：KernelSU 只认模块根目录的 webroot/，且必须存在 index.html，
+        # 否则模块页面入口不出现。权限与 SELinux context 由 KernelSU 自动设置，
+        # 因此这里不做 chmod（也**不要**把 webroot 加进可执行矩阵）。
+        $webSrc = Join-Path $Root 'webroot'
+        if (-not (Test-Path -LiteralPath $webSrc)) {
+            throw "缺少 $webSrc（KernelSU WebUI 入口）"
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $webSrc 'index.html'))) {
+            throw "webroot/ 存在但没有 index.html，KernelSU 不会显示模块页面"
+        }
+        $webDst = Join-Path $stage 'webroot'
+        New-Item -ItemType Directory -Force -Path $webDst | Out-Null
+        Copy-Item -Path (Join-Path $webSrc '*') -Destination $webDst -Recurse
+
         # META-INF 只有仓库根一份，作为唯一事实来源直接复制
         $metaSrc = Join-Path $Root 'META-INF\com\google\android\update-binary'
         if (-not (Test-Path -LiteralPath $metaSrc)) { throw "缺少 $metaSrc" }

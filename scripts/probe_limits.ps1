@@ -3,7 +3,7 @@
 # 覆盖两个"曾经是无消费者的摆设、现已接线"的配置项：
 #   [1] limits.resultPreviewBytes —— 超限时截断 content、丢弃 structuredContent
 #   [2] limits.resultPreviewBytes = 0 —— 不限制，保留 structuredContent
-#   [3] limits.shellTimeoutSeconds —— 由 Go 单元测试覆盖（见下）
+#   [3] shellTimeoutSeconds —— 由 Go 单元测试覆盖（见下）
 #
 # 为什么 [3] 不在这里做端到端：shell 系执行硬编码走 /system/bin/sh，
 # Windows 上没有这个路径，命令根本起不来，无法观察超时行为。
@@ -12,6 +12,8 @@
 #
 # 脚本自行构建 daemon、生成隔离 state 目录并在结束时清理，不依赖设备。
 # 用法: pwsh -File scripts/probe_limits.ps1
+#
+# 本服务不鉴权：所有请求都不带认证头。
 #
 # 判定口径：每条 Check 描述的是"期望行为"，FAIL 即缺陷。
 
@@ -54,15 +56,17 @@ $cfgPath = Join-Path $StateDir 'config.json'
 if (-not (Test-Path $cfgPath)) { Write-Host "配置未生成: $cfgPath"; exit 1 }
 
 $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-$cfg.network.port = $Port
-$cfg.limits.resultPreviewBytes = $PreviewLimit
+$cfg.listen = "127.0.0.1:$Port"
+# 审计目录与 pathguard 的保护前缀取自 config.stateDir（不是 -state 参数），
+# 因此必须一起改，否则在本机（Windows）会落到当前盘的 \data\adb\... 下。
+$cfg.stateDir = $StateDir
+$cfg.resultPreviewBytes = $PreviewLimit
 $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath -Encoding UTF8
 
 $proc = Start-Process -FilePath $exe -ArgumentList @('-state', $StateDir) `
   -RedirectStandardOutput "$StateDir\boot2.log" -RedirectStandardError "$StateDir\boot2.err" `
   -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 2
-$token = (Get-Content (Join-Path $StateDir 'token') -Raw).Trim()
 
 $base = "http://127.0.0.1:$Port/mcp"
 $client = New-Object System.Net.Http.HttpClient
@@ -71,7 +75,6 @@ $client.Timeout = [TimeSpan]::FromSeconds(30)
 function Send($body) {
   $req = New-Object System.Net.Http.HttpRequestMessage('POST', $base)
   $req.Content = New-Object System.Net.Http.StringContent($body, [Text.Encoding]::UTF8, 'application/json')
-  [void]$req.Headers.TryAddWithoutValidation('Authorization', "Bearer $token")
   $resp = $client.SendAsync($req).Result
   return $resp.Content.ReadAsStringAsync().Result
 }
@@ -98,7 +101,7 @@ try {
     "实际 $([Text.Encoding]::UTF8.GetByteCount($head)) 字节"
 
   Write-Host "`n[2] 小结果不受影响：保留 structuredContent"
-  $body2 = Call 'novaai_session_status' '{}'
+  $body2 = Call 'novaai_health_status' '{}'
   $j2 = $body2 | ConvertFrom-Json
   Check '返回 content' ($null -ne $j2.result.content) $body2
   Check '保留 structuredContent' ($body2 -match '"structuredContent"') '未超限却丢了 structuredContent'

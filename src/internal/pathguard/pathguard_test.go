@@ -28,7 +28,6 @@ func TestCheckDeniesProtectedPaths(t *testing.T) {
 		"/data/adb/service.d/y.sh",
 		// stateDir 里的敏感文件：通用载体不得改写
 		testState + "/config.json",
-		testState + "/token",
 		testState + "/audit/2026-01.log",
 		testState + "/mcp.sock",
 	}

@@ -2,155 +2,54 @@
 
 配置文件路径: `/data/adb/novaai-mcp/config.json`
 
-> **本节是这份契约的唯一定义处。** 此前另有一份 `docs/config.example.json`，
-> 它是同一份契约的第二个 owner —— 没有任何测试能保证它与 `internal/config`
-> 同步，两份必然漂移。现已合并到这里。
->
-> 字段的权威来源是 `internal/config/types.go` 与 `internal/config/default.go`；
-> 一份逐键比对的测试（`config/example_test.go`）断言下面的 JSON 与结构体的
-> json tag 完全一致，任一侧增删字段都会立刻失败。
+> **本节是这份契约的唯一定义处。** 字段的权威来源是 `internal/config/types.go`
+> 与 `internal/config/default.go`；一份逐键比对的测试（`config/example_test.go`）
+> 断言下面的 JSON 与结构体的 json tag **完全一致**、取值与 `Default()` **完全一致**，
+> 任一侧增删字段或改值都会立刻失败。
 
 ---
 
 ## 完整配置（可直接复制）
 
-下面的内容与全新安装生成的 `config.json` 等价。`value` 留空是因为
-首次启动会随机生成并写入 `{stateDir}/token`。
+下面的内容与全新安装生成的 `config.json` 等价。
 
 ```json
 {
-  "schemaVersion": 3,
-
-  "network": {
-    "port": 5322,
-    "listenLoopback": true,
-    "listenLan": false,
-    "allowedOrigins": []
-  },
-
-  "paths": {
-    "stateDir": "/data/adb/novaai-mcp",
-    "workDir": "/storage/emulated/0/novaaiAI",
-    "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-    "auditDir": "/data/adb/novaai-mcp/audit"
-  },
+  "stateDir": "/data/adb/novaai-mcp",
+  "listen": "0.0.0.0:5322",
+  "unixSocket": "/data/adb/novaai-mcp/mcp.sock",
+  "profile": "default",
 
   "limits": {
-    "maxRequestBytes": 67108864,
-    "shellTimeoutSeconds": 60,
-    "resultPreviewBytes": 1048576,
-    "shutdownGraceSeconds": 30
-  },
-
-  "security": {
-    "anonymous": false,
-    "validateHost": true,
-    "validateOrigin": true,
-    "allowCors": false,
-
-    "token": {
-      "enabled": true,
-      "value": "",
-      "rotateOnStart": false,
-      "allowQueryParam": false
-    },
-
-    "unixSocket": {
-      "enabled": true,
-      "path": "/data/adb/novaai-mcp/mcp.sock",
-      "mode": "0660",
-      "sepolicyInject": true
-    },
-
-    "lan": {
-      "enabled": false,
-      "allowedCidr": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
-    }
-  },
-
-  "profiles": {
-    "default": {
-      "allowTools": ["*"],
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule",
-                    "novaai_config", "novaai_root_module", "novaai_systemless"],
-      "riskCeiling": 3
-    },
-    "readonly": {
-      "allowTools": ["novaai_status", "novaai_capabilities", "novaai_health_status",
-                     "novaai_root_info", "novaai_device_info", "novaai_fs_info",
-                     "novaai_fs_read", "novaai_fs_search", "novaai_fs_hash",
-                     "novaai_app_list", "novaai_app_info", "novaai_process",
-                     "novaai_log", "novaai_skill", "novaai_diagnostics",
-                     "novaai_session_status", "novaai_session_list",
-                     "novaai_audit_status", "novaai_auth_status"],
-      "denyTools": [],
-      "riskCeiling": 0
-    },
-    "reverse": {
-      "allowTools": ["novaai_reverse_*", "novaai_hook_*", "novaai_fs_read",
-                     "novaai_fs_info", "novaai_app_info", "novaai_app_list",
-                     "novaai_process", "novaai_log", "novaai_device_info",
-                     "novaai_status", "novaai_session_*"],
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule",
-                    "novaai_power", "novaai_root_module"],
-      "riskCeiling": 3
-    },
-    "agent_full": {
-      "allowTools": ["*"],
-      "denyTools": [],
-      "riskCeiling": 3
-    }
-  },
-
-  "sessionBinding": {
-    "byTokenHash": {},
-    "fallback": "default"
+    "globalQps": 50,
+    "shellQps": 10,
+    "maxConcurrent": 5
   },
 
   "audit": {
     "enabled": true,
-    "maxFileBytes": 10485760,
-    "maxFiles": 20,
-    "retentionDays": 30,
-    "includeArgs": true,
-    "argPreviewBytes": 256,
-    "allowlistFields": ["action", "path", "package", "name", "query",
-                        "url", "tool", "pattern", "cmd", "command"]
+    "retentionDays": 7,
+    "maxFileBytes": 10485760
   },
 
-  "rateLimit": {
-    "global": { "qps": 50, "burst": 100 },
-    "perSession": { "qps": 20, "burst": 40, "maxConcurrentTools": 5 },
-    "perTool": {
-      "novaai_log":     { "qps": 2,  "burst": 4 },
-      "novaai_network": { "qps": 5,  "burst": 10 },
-      "novaai_shell":   { "qps": 10, "burst": 20 }
-    }
-  },
+  "shellTimeoutSeconds": 60,
+  "resultPreviewBytes": 1048576,
 
-  "session": {
-    "idleTimeoutSeconds": 1800,
-    "maxSessions": 32,
-    "sweepIntervalSeconds": 300
-  },
-
-  "uninstall": {
-    "purgeInternalState": false,
-    "purgeAuditLogs": false,
-    "purgeCrashDumps": false,
-    "purgeUserData": false
-  }
+  "upstreams": []
 }
 ```
 
-**关掉限流**：把 `rateLimit` 各层的 `qps` 设为 `0`。`qps <= 0` 表示"该层
-不限流"，`maxConcurrentTools: 0` 表示不限并发 —— 不需要删代码。
+就这么多。**没有鉴权配置，没有 LAN 开关，没有多档位。**
 
-**本机免 token**：`security.anonymous: true`。它**只对 loopback 生效**，
-局域网访问始终强制 token（`lan.enabled` 与 `token.enabled` 的组合由启动
-校验强制）。
+- **局域网直连**：默认 `listen` 就是 `0.0.0.0:5322`，同网段设备直接访问。
+- **切回本地模式**：把 `listen` 改成 `127.0.0.1:5322` 即可，**无需改代码**。
+- **关掉限流**：把 `limits` 里对应的 qps 设为 `0` 表示该层不限流，
+  `maxConcurrent: 0` 表示不限并发。
+- **关掉审计**：`audit.enabled: false`。
+- **接上游 MCP**：往 `upstreams` 数组里加条目，或用 KernelSU WebUI 加
+  （WebUI 就是改这个数组）。字段与语义见 [upstream.md](upstream.md)。
 
-**会被拒绝启动的组合**见 [security.md](security.md#启动时的组合校验)。
+权限边界与残余风险见 [security.md](security.md)。
 
 ---
 
@@ -158,17 +57,23 @@
 
 ```json
 {
-  "schemaVersion": 3,
-  "network": { ... },
-  "paths": { ... },
-  "limits": { ... },
-  "security": { ... },
-  "profiles": { ... },
-  "sessionBinding": { ... },
-  "audit": { ... },
-  "rateLimit": { ... },
-  "session": { ... },
-  "uninstall": { ... }
+  "stateDir": "string",
+  "listen": "string",
+  "unixSocket": "string",
+  "profile": "string",
+  "limits": {
+    "globalQps": 0,
+    "shellQps": 0,
+    "maxConcurrent": 0
+  },
+  "audit": {
+    "enabled": true,
+    "retentionDays": 0,
+    "maxFileBytes": 0
+  },
+  "shellTimeoutSeconds": 0,
+  "resultPreviewBytes": 0,
+  "upstreams": []
 }
 ```
 
@@ -176,428 +81,180 @@
 
 ## 字段详细说明
 
-### schemaVersion
-- **类型**: 整数
-- **默认值**: 3
-- **说明**: 配置文件格式版本，不要手动修改
+### stateDir
 
----
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 字符串 | `/data/adb/novaai-mcp` | 状态目录 |
 
-### network (网络配置)
+子目录不再单独配置：`stateDir` 就是那个旋钮。`workspace/` 与 `audit/` 由它
+派生（`{stateDir}/workspace`、`{stateDir}/audit`）；`crash/` 同样固定为
+`{stateDir}/crash`，不可配置 —— 崩溃处理器必须在配置加载**之前**装好，
+一个只能在配置就绪后才可能生效的字段等于没有这个字段。
+
+整个 `stateDir` 受 `pathguard` 保护（`config.json` / `audit/` 不能被通用工具
+改写），只有 `workspace` `tmp` `downloads` `uploads` `artifacts` `backups`
+`schedules` `skills` 这几个子树是 agent 的合法工作区。
+
+### listen
+
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 字符串 | `0.0.0.0:5322` | TCP 监听地址（`host:port`） |
+
+**这是唯一的入口开关。** 主机部分必须是 IP 字面量或 `localhost`，
+否则启动校验直接拒绝。
+
+| 值 | 效果 |
+|----|------|
+| `0.0.0.0:5322` | 局域网直连（默认） |
+| `127.0.0.1:5322` | 仅本机 / 数据线（`adb forward`） |
+
+运行时也可以改：`novaai_config` 的 `update` action 允许修改包括 `listen`
+在内的任意配置字段。监听地址属于运行时配置，不属于 `pathguard` 的保护范围 ——
+这是有意为之，详见 [security.md](security.md)。
+
+### unixSocket
+
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 字符串 | `{stateDir}/mcp.sock` | Unix socket 路径 |
+
+权限固定为 `0660`（未 `chgrp`，仅 root 可连），并尝试注入 SELinux 标签。
+设为空串可关闭。
+
+### profile
+
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 字符串 | `default` | 权限档位名 |
+
+**目前只能写 `default`。** 写别的值会在启动校验被拒绝。
+
+档位定义在 `internal/config/profiles.go`，当前只有一种形状：
+
+```json
+{ "allowTools": ["*"], "denyTools": [], "riskCeiling": 3 }
+```
+
+即放行全部工具、无黑名单、风险上限为最高级 3。这是刻意的：本服务面向
+单用户自有设备，"装完即用、含 shell"是明确诉求；权限边界落在
+**网络可达性**上，而不是档位。
+
+> `tools/call` 的闸门仍然存在（工具存在性 → 档位判定 → 限流 → 执行），
+> 只是当前档位恒为"全放行"。要收窄时改这一处即可。
+
+### limits
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| port | 整数 | 5322 | MCP 服务监听端口 |
-| listenLoopback | 布尔 | true | 是否监听本地回环地址 (127.0.0.1) |
-| listenLan | 布尔 | false | 是否监听局域网地址 (0.0.0.0) |
-| allowedOrigins | 字符串数组 | [] | 允许的 CORS 来源 |
+| globalQps | 数字 | 50 | 全局限流（所有工具共享） |
+| shellQps | 数字 | 10 | `novaai_shell` / `novaai_script` 的独立限流 |
+| maxConcurrent | 整数 | 5 | 同时在执行的工具调用上限；`0` 表示不限 |
 
-**示例**:
-```json
-"network": {
-  "port": 5322,
-  "listenLoopback": true,
-  "listenLan": false,
-  "allowedOrigins": []
-}
-```
+`qps <= 0` 表示该层不限流。
 
----
+> 没有"按客户端身份"的层：所有来源本来就是同一个身份（无 token、
+> 不分来源），多一个维度只是多一处可被误读的状态。
 
-### paths (路径配置)
-
-子目录（downloads / uploads / artifacts / tmp）不再单独配置：`stateDir` 就是那个旋钮。
-它们仍会作为 `stateDir` 下的固定子目录被创建，并由 `pathguard` 视为可写子树。
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| stateDir | 字符串 | /data/adb/novaai-mcp | 状态目录（配置、日志等） |
-| workDir | 字符串 | /storage/emulated/0/novaaiAI | 工作目录（用户数据） |
-| workspaceRoot | 字符串 | {stateDir}/workspace | 工作空间根目录（相对路径的解析基准） |
-| auditDir | 字符串 | {stateDir}/audit | 审计日志目录 |
-
-崩溃转储目录固定为 `{stateDir}/crash`，不可配置：崩溃处理器必须在配置加载
-**之前**装好，否则配置解析阶段自身的 panic 没有兜底 —— 一个只能在配置就绪后
-才可能生效的字段等于没有这个字段。
-
-**示例**:
-```json
-"paths": {
-  "stateDir": "/data/adb/novaai-mcp",
-  "workDir": "/storage/emulated/0/novaaiAI",
-  "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-  "auditDir": "/data/adb/novaai-mcp/audit"
-}
-```
-
----
-
-### limits (限制配置)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| maxRequestBytes | 整数 | 67108864 | 最大请求体大小 (64MB)，超限返回 `-32600` |
-| shellTimeoutSeconds | 整数 | 60 | `novaai_shell` / `novaai_script` 未显式指定 `timeoutMs` 时的默认超时 |
-| resultPreviewBytes | 整数 | 1048576 | 单个工具结果的字节上限 (1MB)，超限截断并丢弃 `structuredContent` |
-| shutdownGraceSeconds | 整数 | 30 | 优雅关闭等待时间 |
-
-**示例**:
-```json
-"limits": {
-  "maxRequestBytes": 67108864,
-  "shellTimeoutSeconds": 60,
-  "resultPreviewBytes": 1048576,
-  "shutdownGraceSeconds": 30
-}
-```
-
----
-
-### security (安全配置)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| anonymous | 布尔 | false | 是否允许匿名访问 |
-| validateHost | 布尔 | true | 是否验证 Host 头 |
-| validateOrigin | 布尔 | true | 是否验证 Origin 头 |
-| allowCors | 布尔 | false | 是否允许 CORS |
-
-**示例**:
-```json
-"security": {
-  "anonymous": false,
-  "validateHost": true,
-  "validateOrigin": true,
-  "allowCors": false
-}
-```
-
----
-
-### security.token (Token 认证)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| enabled | 布尔 | true | 是否启用 Token 认证 |
-| value | 字符串 | (自动生成) | Token 值 |
-| rotateOnStart | 布尔 | false | 启动时是否轮换 Token |
-| allowQueryParam | 布尔 | false | 是否允许通过 URL 参数传递 Token |
-
-**示例**:
-```json
-"token": {
-  "enabled": true,
-  "value": "your-secret-token-here",
-  "rotateOnStart": false,
-  "allowQueryParam": false
-}
-```
-
----
-
-### security.unixSocket (Unix Socket)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| enabled | 布尔 | true | 是否启用 Unix Socket |
-| path | 字符串 | {stateDir}/mcp.sock | Socket 文件路径 |
-| mode | 字符串 | 0660 | Socket 文件权限 |
-| sepolicyInject | 布尔 | true | 是否注入 SELinux 策略 |
-
-**示例**:
-```json
-"unixSocket": {
-  "enabled": true,
-  "path": "/data/adb/novaai-mcp/mcp.sock",
-  "mode": "0660",
-  "sepolicyInject": true
-}
-```
-
----
-
-### security.lan (局域网访问)
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| enabled | 布尔 | false | 是否允许局域网访问 |
-| allowedCidr | 字符串数组 | ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] | 允许的 IP 段 |
-
-**示例**:
-```json
-"lan": {
-  "enabled": false,
-  "allowedCidr": ["192.168.0.0/16", "10.0.0.0/8"]
-}
-```
-
----
-
-### profiles (权限配置)
-
-每个 profile 定义了一组允许/拒绝的工具列表。**profile 在每次 `tools/call` 时强制校验**：
-先按 `denyTools` 拒绝，再按 `allowTools` 允许，同时要求工具风险等级不超过 `riskCeiling`。
-校验失败返回 JSON-RPC 错误 `-32003`，并写入一条 `profile_denied` 审计记录。
-
-具体使用哪个 profile，由 [sessionBinding](#sessionbinding-会话绑定) 决定。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| allowTools | 字符串数组 | 允许的工具列表，支持 glob（`*` 表示全部） |
-| denyTools | 字符串数组 | 拒绝的工具列表，优先级高于 allowTools |
-| riskCeiling | 整数 | 允许的最高风险等级 (0-3) |
-
-**风险等级**:
-- 0: 只读操作
-- 1: 普通写操作
-- 2: 修改设备状态
-- 3: 破坏性操作
-
-**示例**:
-```json
-"profiles": {
-  "default": {
-    "allowTools": ["*"],
-    "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_config",
-                  "novaai_root_module", "novaai_systemless"],
-    "riskCeiling": 3
-  },
-  "readonly": {
-    "allowTools": ["novaai_status", "novaai_fs_info", "novaai_app_list"],
-    "denyTools": [],
-    "riskCeiling": 0
-  }
-}
-```
-
-> `default` 默认不含 `novaai_shell` / `novaai_script` / `novaai_schedule`：
-> 这三个都能到达任意命令执行（`novaai_schedule` 是 create 写脚本 + run 用 `sh` 执行），
-> 通用 shell 能绕过所有工具级防护，所以默认交给 `agent_full`。
-> 需要时把 token 绑到 `agent_full`，详见 [docs/security.md](security.md)。
-
----
-
-### sessionBinding (会话绑定)
-
-决定每个请求使用哪个 profile。服务端在鉴权通过后，对**本次请求携带的 token** 计算
-`sha256` 十六进制摘要，在 `byTokenHash` 里查表；查不到则回退到 `fallback`。
-无 token 的入口（unix socket、`anonymous: true` 时的 loopback）同样走 `fallback`。
-
-这样可以给不同客户端分配不同权限，例如为只读客户端单独发一个 token：
-
-```sh
-printf %s "$(cat /data/adb/novaai-mcp/token)" | sha256sum
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| byTokenHash | 对象 | token 的 sha256 十六进制摘要 → profile 名称 |
-| fallback | 字符串 | 查不到时使用的 profile 名称 |
-
-**示例**:
-```json
-"sessionBinding": {
-  "byTokenHash": {
-    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08": "readonly"
-  },
-  "fallback": "default"
-}
-```
-
----
-
-### audit (审计配置)
+### audit
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | enabled | 布尔 | true | 是否启用审计 |
-| maxFileBytes | 整数 | 10485760 | 单个审计文件最大大小 (10MB) |
-| maxFiles | 整数 | 20 | 最大审计文件数 |
-| retentionDays | 整数 | 30 | 审计日志保留天数 |
-| includeArgs | 布尔 | true | 是否记录工具参数 |
-| argPreviewBytes | 整数 | 256 | 参数预览最大字节数 |
-| allowlistFields | 字符串数组 | [...] | 允许记录的字段列表（其余字段一律脱敏） |
+| retentionDays | 整数 | 7 | 日志保留天数 |
+| maxFileBytes | 整数 | 10485760 | 单个日志文件上限 (10MB)，超过则轮转 |
 
-**示例**:
-```json
-"audit": {
-  "enabled": true,
-  "maxFileBytes": 10485760,
-  "maxFiles": 20,
-  "retentionDays": 30,
-  "includeArgs": true,
-  "argPreviewBytes": 256,
-  "allowlistFields": ["action", "path", "package", "name"]
-}
-```
+审计为 JSONL，按日命名（`audit-YYYY-MM-DD.jsonl`），文件权限 `0600`、
+目录 `0700`。同一天内超过单文件上限时加序号后缀（`audit-2026-09-20.1.jsonl`）。
 
-> 只有 `allowlist` 一种脱敏实现，没有可关闭脱敏的开关。
+参数按固定白名单脱敏：`action` `path` `package` `name` `query` `url`
+`tool` `pattern` `cmd` `command` 原样记录（截断到 256 字节），其余参数
+一律记为 `***`。**没有可关闭脱敏的开关。**
 
----
+记录的事件：`initialize` `tool_call` `rate_limited` `concurrency_limited`
+`host_rejected` `origin_rejected` `session_create` `session_close`
+`session_idle_expire`。
 
-### rateLimit (频率限制)
+### shellTimeoutSeconds
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| global | 对象 | 全局限制 |
-| perSession | 对象 | 第二层限制，**按客户端身份（token 哈希）计数** |
-| perTool | 对象 | 每工具限制 |
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 整数 | 60 | shell 系工具未指定 `timeoutMs` 时的默认超时 |
 
-> `perSession` 这个名字里的 "session" 指**客户端身份**，不是 MCP 的
-> `Mcp-Session-Id`。后者由客户端自行携带，换一个或不带就能拿到一个全新的
-> 满额桶，用它做限流键等于没有限流。因此服务端用 token 的 `sha256` 作为键；
-> 无 token 的入口（unix socket、匿名 loopback）共用一个 `local` 桶。
+这是默认超时的**唯一来源**（`internal/tools/v02/helpers.go` 的
+`shellTimeout`）。超时会杀掉整个进程组，不留子进程。
 
-**示例**:
-```json
-"rateLimit": {
-  "global": {"qps": 50, "burst": 100},
-  "perSession": {
-    "qps": 20,
-    "burst": 40,
-    "maxConcurrentTools": 5
-  },
-  "perTool": {
-    "novaai_shell": {"qps": 10, "burst": 20}
-  }
-}
-```
+### resultPreviewBytes
+
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 整数 | 1048576 | 单个工具结果的字节上限 (1MB)；`0` 表示不限制 |
+
+超过上限时截断 `content`（不切断 UTF-8 字符）、追加一行截断说明，
+并**丢弃 `structuredContent`** —— 只截 `content` 而保留完整的结构化副本，
+帧大小一点没省，还会让两者不一致。
+
+### upstreams
+
+| 类型 | 默认值 | 说明 |
+|------|--------|------|
+| 数组 | `[]` | 上游 MCP 服务列表 |
+
+每一项描述一个上游 MCP 服务；它的工具会以 `{name}__{tool}` 合并进本服务的
+`tools/list`。**默认空数组**：装完即用不需要任何上游。
+
+推荐用 KernelSU WebUI 增删（它做的就是原子改写这一个数组）。手动写时字段
+语义、状态模型、路由规则、启动配置见 **[upstream.md](upstream.md)**。
+
+> 上游**状态**（running / stopped / error / disabled）不落盘，每次启动重新
+> 探测。所以这里只有配置，没有状态字段。
 
 ---
 
-### session (会话配置)
+## 固定的行为（不是配置项）
 
-只有携带有效 `Mcp-Session-Id` 的请求，以及包含 `initialize` 的请求，才会占用
-会话名额。其余请求走无状态路径，不登记会话 —— 否则不实现会话的客户端每发一个
-请求就会消耗一个名额，很快撞上 `maxSessions` 并持续收到 `-32014`。
+| 行为 | 值 | 位置 |
+|------|----|------|
+| 请求体上限 | 64 MiB（超限返回 `-32600`） | `config.MaxRequestBytes` |
+| 优雅关闭等待 | 30 秒 | `config.ShutdownGraceSec` |
+| 会话空闲超时 | 30 分钟 | `internal/session` |
+| 最大会话数 | 32 | `internal/session` |
+| socket 文件权限 | `0660` | `internal/shutdown` |
+| 参数脱敏白名单 | 见上 | `internal/audit/redact.go` |
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| idleTimeoutSeconds | 整数 | 1800 | 会话空闲超时 (30分钟) |
-| maxSessions | 整数 | 32 | 最大会话数 |
-| sweepIntervalSeconds | 整数 | 300 | 清理间隔 (5分钟) |
-
-**示例**:
-```json
-"session": {
-  "idleTimeoutSeconds": 1800,
-  "maxSessions": 32,
-  "sweepIntervalSeconds": 300
-}
-```
+它们被刻意排除在配置之外：单用户自有设备场景下，多一个旋钮只多一处
+需要同步的心智负担。需要改就直接改常量。
 
 ---
 
-### uninstall (卸载配置)
+## 非法配置
 
-由 `uninstall.sh` 读取，服务端进程本身不使用。**四个开关默认全部为 false**，
-即卸载时默认不删除任何数据；要删必须显式写 `true`。
+`config.Validate` 会在启动时拒绝：
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| purgeInternalState | 布尔 | false | 卸载时是否清理内部状态目录（是超集：会连带审计/崩溃/日志一起删除） |
-| purgeAuditLogs | 布尔 | false | 卸载时是否清理审计日志（仅在保留内部状态目录时生效） |
-| purgeCrashDumps | 布尔 | false | 卸载时是否清理崩溃转储（仅在保留内部状态目录时生效） |
-| purgeUserData | 布尔 | false | 卸载时是否清理用户数据目录（`/storage/emulated/0/novaaiAI`） |
+| 情况 | 错误 |
+|------|------|
+| `stateDir` 为空 | `stateDir 不能为空` |
+| `listen` 不是 `host:port` / 端口越界 / 主机是域名 | `listen ...` |
+| `profile` 不是 `default` | `profile 只能是 "default"` |
+| `shellTimeoutSeconds <= 0` | `shellTimeoutSeconds 必须 > 0` |
+| `resultPreviewBytes < 0` | `resultPreviewBytes 不能为负` |
+| 上游 `name` 为空 / 含非法字符 / **含 `__`** / 重复 | `upstreams[N] (...).name ...` |
+| 上游 `type` 不是 `http` / `stdio` | `upstreams[N] (...).type 只能是 ...` |
+| http 上游缺 `url`，或 url 不是 http(s):// | `upstreams[N] (...).url ...` |
+| stdio 上游缺 `command` | `upstreams[N] (...).command ...` |
+| `riskCeiling` 不在 0..3 | `upstreams[N] (...).riskCeiling ...` |
+| `denyTools` 含非法工具名 | `upstreams[N] (...).denyTools 含非法工具名 ...` |
+| `launch` 配置不完整（intent 缺 package、缺 action/activity；command 缺 command） | `upstreams[N] (...).launch ...` |
 
-**示例**:
-```json
-"uninstall": {
-  "purgeInternalState": false,
-  "purgeAuditLogs": false,
-  "purgeCrashDumps": false,
-  "purgeUserData": false
-}
-```
+上游校验在**启动时**就把关，不留到运行时：`name` 是工具名前缀，一个写错的
+名字会让一整批工具出现在 `tools/list` 里却永远路由不到。
 
----
+旧配置里的未知键（`security`、`network`、`profiles`、`sessionBinding`、
+`rateLimit`、`session`、`paths`、`skill`、`capabilities`…）会被
+`json.Unmarshal` **静默忽略**，不需要手工清理。详见 [migration.md](migration.md)。
 
-## 完整配置示例
-
-```json
-{
-  "schemaVersion": 3,
-  "network": {
-    "port": 5322,
-    "listenLoopback": true,
-    "listenLan": false,
-    "allowedOrigins": []
-  },
-  "paths": {
-    "stateDir": "/data/adb/novaai-mcp",
-    "workDir": "/storage/emulated/0/novaaiAI",
-    "workspaceRoot": "/data/adb/novaai-mcp/workspace",
-    "auditDir": "/data/adb/novaai-mcp/audit"
-  },
-  "limits": {
-    "maxRequestBytes": 67108864,
-    "shellTimeoutSeconds": 60,
-    "resultPreviewBytes": 1048576,
-    "shutdownGraceSeconds": 30
-  },
-  "security": {
-    "anonymous": false,
-    "validateHost": true,
-    "validateOrigin": true,
-    "allowCors": false,
-    "token": {
-      "enabled": true,
-      "value": "your-secret-token",
-      "rotateOnStart": false,
-      "allowQueryParam": false
-    },
-    "unixSocket": {
-      "enabled": true,
-      "path": "/data/adb/novaai-mcp/mcp.sock",
-      "mode": "0660",
-      "sepolicyInject": true
-    },
-    "lan": {
-      "enabled": false,
-      "allowedCidr": ["192.168.0.0/16", "10.0.0.0/8"]
-    }
-  },
-  "profiles": {
-    "default": {
-      "allowTools": ["*"],
-      "denyTools": ["novaai_shell", "novaai_script", "novaai_schedule", "novaai_config",
-                    "novaai_root_module", "novaai_systemless"],
-      "riskCeiling": 3
-    },
-    "readonly": {
-      "allowTools": ["novaai_status", "novaai_fs_info"],
-      "denyTools": [],
-      "riskCeiling": 0
-    }
-  },
-  "sessionBinding": {
-    "byTokenHash": {},
-    "fallback": "default"
-  },
-  "audit": {
-    "enabled": true,
-    "maxFileBytes": 10485760,
-    "maxFiles": 20,
-    "retentionDays": 30,
-    "includeArgs": true,
-    "argPreviewBytes": 256,
-    "allowlistFields": ["action", "path", "package"]
-  },
-  "rateLimit": {
-    "global": {"qps": 50, "burst": 100},
-    "perSession": {"qps": 20, "burst": 40, "maxConcurrentTools": 5},
-    "perTool": {}
-  },
-  "session": {
-    "idleTimeoutSeconds": 1800,
-    "maxSessions": 32,
-    "sweepIntervalSeconds": 300
-  },
-  "uninstall": {
-    "purgeInternalState": false,
-    "purgeAuditLogs": false,
-    "purgeCrashDumps": false,
-    "purgeUserData": false
-  }
-}
-```
+> 唯一例外是 `uninstall` 段：它**不被 Go 读取，但被 `uninstall.sh` 用 `grep`
+> 读取**（`purgeInternalState` / `purgeAuditLogs` / `purgeCrashDumps` /
+> `purgeUserData`，默认全 `false` 即保留数据）。想控制卸载行为就必须手工
+> 写这一段 —— 它是本仓库里唯一"配置键不在 `Config` 结构体里"的合法存在。

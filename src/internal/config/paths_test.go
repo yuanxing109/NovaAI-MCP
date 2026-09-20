@@ -7,11 +7,9 @@ import (
 
 // 本文件锁住"配置里的路径必须是 POSIX 形式"。
 //
-// 背景：default.go 曾经用 filepath.Join 拼 stateDir 下的子路径。
-// 在 Linux/Android 上它与 path.Join 等价，所以问题不可见；在 Windows 上
-// 它会产出 `\data\adb\novaai-mcp\workspace`。而 pathguard.Normalize
-// 对不以 "/" 开头的输入**原样返回**，于是这条路径会被当成相对路径，
-// 受保护判定静默失效 —— 不报错，只是不再保护。
+// 背景：stateDir 下的子路径曾经用 filepath.Join 拼接，在 Windows 上会产出
+// `\data\adb\novaai-mcp\workspace`。而 pathguard.Normalize 对不以 "/" 开头的
+// 输入**原样返回**，于是这条路径会被当成相对路径，受保护判定静默失效。
 //
 // 这类 bug 只在跨平台时显现，因此必须有测试而不是靠 review。
 
@@ -19,11 +17,10 @@ func TestDefaultPathsArePOSIX(t *testing.T) {
 	cfg := Default()
 
 	paths := map[string]string{
-		"stateDir":      cfg.Paths.StateDir,
-		"workDir":       cfg.Paths.WorkDir,
-		"workspaceRoot": cfg.Paths.WorkspaceRoot,
-		"auditDir":      cfg.Paths.AuditDir,
-		"unixSocket":    cfg.Security.UnixSocket.Path,
+		"stateDir":      cfg.StateDir,
+		"workspaceRoot": cfg.WorkspaceRoot(),
+		"auditDir":      cfg.AuditDir(),
+		"unixSocket":    cfg.UnixSocket,
 	}
 	for name, p := range paths {
 		if !strings.HasPrefix(p, "/") {
@@ -40,7 +37,7 @@ func TestDefaultPathsArePOSIX(t *testing.T) {
 // 防止将来有人"顺手"改回 filepath.Join 而前缀检查又恰好通过。
 func TestDefaultSubpathsJoinWithSlash(t *testing.T) {
 	cfg := Default()
-	base := cfg.Paths.StateDir
+	base := cfg.StateDir
 	if base != "/data/adb/novaai-mcp" {
 		t.Fatalf("stateDir 默认值变了: %q", base)
 	}
@@ -51,9 +48,9 @@ func TestDefaultSubpathsJoinWithSlash(t *testing.T) {
 		"unixSocket":    base + "/mcp.sock",
 	}
 	got := map[string]string{
-		"workspaceRoot": cfg.Paths.WorkspaceRoot,
-		"auditDir":      cfg.Paths.AuditDir,
-		"unixSocket":    cfg.Security.UnixSocket.Path,
+		"workspaceRoot": cfg.WorkspaceRoot(),
+		"auditDir":      cfg.AuditDir(),
+		"unixSocket":    cfg.UnixSocket,
 	}
 	for k, w := range want {
 		if got[k] != w {
@@ -62,18 +59,23 @@ func TestDefaultSubpathsJoinWithSlash(t *testing.T) {
 	}
 }
 
-// profile 名与工具名都是标识符，不该受平台影响；
-// 这条同时确认 DefaultProfiles 在两个平台上一致。
-func TestDefaultProfilesAreStable(t *testing.T) {
+// 默认档位固定为 default，且放行全部工具。
+func TestDefaultProfileIsStable(t *testing.T) {
 	cfg := Default()
-	p, ok := cfg.Profiles["readonly"]
+	if cfg.Profile != DefaultProfileName {
+		t.Errorf("默认 profile = %q，期望 %q", cfg.Profile, DefaultProfileName)
+	}
+	p, ok := DefaultProfiles()[DefaultProfileName]
 	if !ok {
-		t.Fatal("缺少 readonly profile")
+		t.Fatalf("缺少 %s 档位", DefaultProfileName)
 	}
-	if p.RiskCeiling != 0 {
-		t.Errorf("readonly 的 riskCeiling = %d，期望 0", p.RiskCeiling)
+	if p.RiskCeiling != 3 {
+		t.Errorf("%s 的 riskCeiling = %d，期望 3", DefaultProfileName, p.RiskCeiling)
 	}
-	if len(p.AllowTools) == 0 {
-		t.Error("readonly 的 allowTools 为空")
+	if len(p.AllowTools) != 1 || p.AllowTools[0] != "*" {
+		t.Errorf("%s 的 allowTools = %v，期望 [\"*\"]", DefaultProfileName, p.AllowTools)
+	}
+	if len(p.DenyTools) != 0 {
+		t.Errorf("%s 的 denyTools = %v，期望为空", DefaultProfileName, p.DenyTools)
 	}
 }

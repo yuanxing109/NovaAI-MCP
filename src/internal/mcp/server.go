@@ -13,6 +13,7 @@ import (
 	"github.com/novaai/novaai-mcp/internal/profile"
 	"github.com/novaai/novaai-mcp/internal/ratelimit"
 	"github.com/novaai/novaai-mcp/internal/tools"
+	"github.com/novaai/novaai-mcp/internal/upstream"
 )
 
 // ServerVersion 是 serverInfo.version 的唯一来源，避免多处硬编码漂移。
@@ -29,20 +30,19 @@ type ServerConfig struct {
 	Audit     *audit.Logger
 	RateLimit *ratelimit.Limiter
 	Deps      *tools.Deps
+	// Upstreams 是上游 MCP 聚合注册表。nil 表示不做聚合（测试里常见）。
+	Upstreams *upstream.Registry
 }
 
-// Identity 是本次请求的鉴权结果，由中间件解析后传入协议层。
+// Identity 是本次请求的协议层标识，由中间件解析后传入。
 //
-// 三个字段职责不同，不要混用：
-//   - SessionID：MCP 会话 id，只用于审计与 session_list；无状态请求为空串。
-//   - Profile：本次请求的 token 解析出的 profile，**权限决策的唯一依据**。
-//     不能改读会话上记录的 profile —— 同一个 Mcp-Session-Id 可以被不同
-//     token 复用，那样会让低权限 token 继承高权限会话。
-//   - RateKey：客户端不可伪造的限流身份键（token 哈希），只给限流器用。
+// 两个字段职责不同，不要混用：
+//   - SessionID：MCP 会话 id，只用于审计与日志；无状态请求为空串。
+//   - Profile：永远是 config.DefaultProfileName。它是常量，不是"解析结果"——
+//     中间件不再做鉴权，也没有任何输入能改变它。
 type Identity struct {
 	SessionID string
 	Profile   string
-	RateKey   string
 }
 
 type Server struct {
@@ -203,8 +203,38 @@ func (s *Server) handleToolsList(req *JSONRPCRequest) *JSONRPCResponse {
 		return nil
 	}
 	return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-		"tools": s.cfg.Registry.List(),
+		"tools": s.mergedTools(),
 	}}
+}
+
+// mergedTools 合并本地工具与上游工具，作为 tools/list 的唯一出口。
+//
+// 上游工具**不进** tools.Registry：它们的数量随用户配置动态变化，
+// 塞进注册表会让"工具总数"这个被断言锁住的数字跟着配置漂移，
+// 也会让 register_test 的负向清单失去意义。合并只发生在这一处。
+//
+// 上游工具没有 Handler —— 它们不可通过本地注册表执行，调用一律走
+// handleToolsCall 的上游分支。
+func (s *Server) mergedTools() []*tools.Tool {
+	local := s.cfg.Registry.List()
+	if s.cfg.Upstreams == nil {
+		return local
+	}
+	remote := s.cfg.Upstreams.MergedTools()
+	if len(remote) == 0 {
+		return local
+	}
+	out := make([]*tools.Tool, 0, len(local)+len(remote))
+	out = append(out, local...)
+	for _, t := range remote {
+		out = append(out, &tools.Tool{
+			Name:        t.Name,
+			Title:       t.Title,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		})
+	}
+	return out
 }
 
 func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCResponse {
@@ -219,30 +249,38 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCRe
 		return errorResponse(req.ID, -32602, "invalid params: "+err.Error())
 	}
 
-	t, ok := s.cfg.Registry.Get(params.Name)
-	if !ok {
-		if IsNotification(req) {
+	// 通知形式的 tools/call 没有回包渠道，执行但丢弃结果。
+	notify := IsNotification(req)
+
+	// ---- ① 工具存在性：先本地，再按命名空间前缀找上游 ----
+	localTool, isLocal := s.cfg.Registry.Get(params.Name)
+	upName, upTool := "", ""
+	isUpstream := false
+	if !isLocal && s.cfg.Upstreams != nil {
+		if n, t, ok := s.cfg.Upstreams.SplitName(params.Name); ok {
+			upName, upTool, isUpstream = n, t, true
+		}
+	}
+	if !isLocal && !isUpstream {
+		if notify {
 			return nil
 		}
 		return errorResponse(req.ID, -32015, "工具不存在: "+params.Name)
 	}
 
-	// 通知形式的 tools/call 没有回包渠道，执行但丢弃结果。
-	notify := IsNotification(req)
-
-	// ---- 权限：静态 profile（白名单/黑名单 + 风险上限）----
+	// ---- ② 权限：本地走静态档位；上游走该上游的 denyTools / riskCeiling ----
 	//
 	// 这是整个服务唯一的策略收口点：所有工具调用都经由这里，不必在工具内部
-	// 各自加守卫。策略来自配置文件的静态 profile，不做交互式确认 —— 配置一次
-	// 长期生效，避免每次调用都要人工放行。
+	// 各自加守卫。档位不由任何请求输入决定 —— 没有 token，没有来源判定，
+	// 也没有会话绑定。唯一的 default 档位允许全部本地工具（denyTools 为空、
+	// allowTools 为 ["*"]），所以这一道对本地工具当前的净效果是"永远放行"；
+	// 保留它是因为风险上限与工具名匹配的语义仍在，未来要收窄时改一处即可。
 	//
-	// profile 取本次请求 token 的解析结果（ident.Profile），不读会话记录：
-	// Mcp-Session-Id 由客户端携带，可以被复用。
-	if s.cfg.Deps != nil && s.cfg.Deps.Profiles != nil {
-		profName := ident.Profile
-		if profName == "" {
-			profName = "default"
-		}
+	// 会话不携带权限。鉴权结果固定为全局 default profile，永不从 session
+	// 读取。历史实现曾把 profile 挂在 session 上，仅作观测；现已删除，
+	// 防止误读。
+	if isLocal && s.cfg.Deps != nil && s.cfg.Deps.Profiles != nil {
+		profName := config.DefaultProfileName
 		p := s.cfg.Deps.Profiles.Get(profName)
 		risk := profile.ResolveRisk(params.Name, params.Arguments)
 		if !profile.Allows(&p, params.Name, risk) {
@@ -262,13 +300,34 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCRe
 					params.Name, profName, risk))
 		}
 	}
+	if isUpstream {
+		risk, err := s.cfg.Upstreams.Authorize(upName, upTool, params.Arguments)
+		if err != nil {
+			s.cfg.Audit.Log(audit.Entry{
+				Event:   "upstream_denied",
+				Tool:    params.Name,
+				Session: ident.SessionID,
+				Risk:    risk,
+				Result:  "denied",
+				Detail:  err.Error(),
+			})
+			if notify {
+				return nil
+			}
+			// 上游策略拒绝是"业务失败"而不是协议故障：
+			// 客户端应当看到一次正常的工具失败，而不是 JSON-RPC 错误。
+			return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID,
+				Result: errorResult(err.Error())}
+		}
+	}
 
-	// ---- 限流：全局 / 客户端身份 / 工具 ----
+	// ---- ③ 限流：全局 / shell / 并发 ----
 	//
-	// 键用 ident.RateKey（token 哈希）而不是 sessionID：后者是客户端自报的
-	// 请求头，每次换一个就能拿到全新的满额桶，限流会被完全绕过。
+	// 没有按身份的桶：所有来源本来就是同一个身份，多一个维度只是多一处
+	// 可被误读的状态。上游工具的带前缀名不会命中 shellTools 表，
+	// 所以它们只吃全局桶 —— 这正是想要的。
 	if s.cfg.RateLimit != nil {
-		if err := s.cfg.RateLimit.Allow(ident.RateKey, params.Name); err != nil {
+		if err := s.cfg.RateLimit.Allow(params.Name); err != nil {
 			s.cfg.Audit.Log(audit.Entry{
 				Event: "rate_limited", Tool: params.Name, Session: ident.SessionID,
 				Result: "denied", Detail: err.Error(),
@@ -279,7 +338,7 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCRe
 			return errorResponse(req.ID, -32009, err.Error())
 		}
 		// ---- 并发槽 ----
-		if !s.cfg.RateLimit.AcquireSlot(ident.RateKey) {
+		if !s.cfg.RateLimit.AcquireSlot() {
 			lerr := &ratelimit.LimitError{
 				Scope: ratelimit.ScopeConcurrent,
 				Tool:  params.Name,
@@ -294,32 +353,58 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCRe
 			}
 			return errorResponse(req.ID, -32010, lerr.Error())
 		}
-		defer s.cfg.RateLimit.ReleaseSlot(ident.RateKey)
+		defer s.cfg.RateLimit.ReleaseSlot()
 	}
 
+	// ---- ④ 路由：本地执行 / 上游转发 ----
 	ctx := context.Background()
+	start := time.Now()
+
+	entry := audit.Entry{
+		Event:   "tool_call",
+		Tool:    params.Name,
+		Session: ident.SessionID,
+	}
+	if s.cfg.Config.Audit.Enabled {
+		entry.ArgsPreview = audit.BuildArgsPreview(params.Arguments)
+	}
+
+	if isUpstream {
+		// 上游工具不经 safeCall：转发路径里没有第三方 Handler 可 panic，
+		// 而 upstream.Call 自己已经把协议错误转成了 error。
+		outcome, err := s.cfg.Upstreams.Call(ctx, upName, upTool, params.Arguments)
+		entry.DurationMS = time.Since(start).Milliseconds()
+		if err != nil {
+			entry.Result = "error"
+			entry.Detail = err.Error()
+			s.cfg.Audit.Log(entry)
+			if notify {
+				return nil
+			}
+			// 上游不可用/转发失败都是业务失败，不是协议故障。
+			return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID,
+				Result: errorResult(err.Error())}
+		}
+		entry.Result = "ok"
+		s.cfg.Audit.Log(entry)
+		if notify {
+			return nil
+		}
+		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID,
+			Result: renderUpstreamResult(outcome, s.resultLimit())}
+	}
+
 	ctx = tools.WithSessionID(ctx, ident.SessionID)
 	ctx = tools.WithProfile(ctx, ident.Profile)
 	ctx = tools.WithDeps(ctx, s.cfg.Deps)
 
-	start := time.Now()
-	result, err := safeCall(ctx, t, params.Arguments)
-	elapsed := time.Since(start).Milliseconds()
-
-	entry := audit.Entry{
-		Event:      "tool_call",
-		Tool:       params.Name,
-		Session:    ident.SessionID,
-		DurationMS: elapsed,
-	}
+	result, err := safeCall(ctx, localTool, params.Arguments)
+	entry.DurationMS = time.Since(start).Milliseconds()
 	if err != nil {
 		entry.Result = "error"
 		entry.Detail = err.Error()
 	} else {
 		entry.Result = "ok"
-	}
-	if s.cfg.Config.Audit.IncludeArgs {
-		entry.ArgsPreview = audit.BuildArgsPreview(params.Arguments, &s.cfg.Config.Audit)
 	}
 	s.cfg.Audit.Log(entry)
 
@@ -337,12 +422,51 @@ func (s *Server) handleToolsCall(req *JSONRPCRequest, ident Identity) *JSONRPCRe
 		Result: successResult(result, s.resultLimit())}
 }
 
+// renderUpstreamResult 把上游返回的 MCP 结果原样透出。
+//
+// 上游给的已经是 {content:[...], structuredContent, isError} 的形状，
+// 再套一层 successResult 会把它当普通对象 JSON 序列化进 content[0].text，
+// 客户端要多解析一层才能拿到真实结果 —— 那是明显的退化。
+//
+// 截断仍然在这里做：这是所有工具结果（含上游）的唯一出口，
+// resultPreviewBytes 的语义必须对两者一致。
+func renderUpstreamResult(o *upstream.Outcome, limit int64) CallToolResult {
+	if o == nil {
+		return CallToolResult{Content: []ContentItem{{Type: "text", Text: ""}}}
+	}
+	items := make([]ContentItem, 0, len(o.Content))
+	total := 0
+	for _, c := range o.Content {
+		items = append(items, ContentItem{Type: c.Type, Text: c.Text})
+		total += len(c.Text)
+	}
+	if len(items) == 0 {
+		items = []ContentItem{{Type: "text", Text: toText(o.StructuredContent)}}
+		total = len(items[0].Text)
+	}
+
+	if limit > 0 && int64(total) > limit {
+		trimmed := truncateBytes(items[0].Text, limit)
+		return CallToolResult{
+			Content: []ContentItem{{Type: "text", Text: trimmed +
+				fmt.Sprintf("\n\n[结果已截断：原始 %d 字节，上限 %d 字节。请用更精确的参数缩小范围。]",
+					total, limit)}},
+			IsError: o.IsError,
+		}
+	}
+	return CallToolResult{
+		Content:           items,
+		StructuredContent: o.StructuredContent,
+		IsError:           o.IsError,
+	}
+}
+
 // resultLimit 返回单个工具结果的字节上限。0 表示不限制。
 func (s *Server) resultLimit() int64 {
 	if s.cfg.Config == nil {
 		return 0
 	}
-	return s.cfg.Config.Limits.ResultPreviewBytes
+	return s.cfg.Config.ResultPreviewBytes
 }
 
 // safeCall 包住工具 Handler，任何 panic 都转成普通错误，

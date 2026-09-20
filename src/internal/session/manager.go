@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/novaai/novaai-mcp/internal/audit"
-	"github.com/novaai/novaai-mcp/internal/config"
 )
+
+// 会话不携带权限。鉴权结果固定为全局 default profile，永不从 session 读取。
+// 历史实现曾把 profile 挂在 session 上，仅作观测；现已删除，防止误读。
 
 var (
 	ErrTooManySessions = errors.New("会话数超过上限")
@@ -17,18 +19,24 @@ var (
 	ErrSessionExpired  = errors.New("会话已过期")
 )
 
+// 会话相关的固定行为。
+//
+// 它们不再是配置项：方案里配置只保留 stateDir/listen/unixSocket/profile/
+// limits/audit/shellTimeoutSeconds/resultPreviewBytes。取值沿用重构前默认值。
+const (
+	idleTimeout   = 30 * time.Minute
+	maxSessions   = 32
+	sweepInterval = 5 * time.Minute
+)
+
 // State 是一个已登记的 MCP 会话。
 //
-// 字段必须全部可 JSON 序列化：session_list 直接把它编码给客户端。
-// 不要在这里放 func / chan —— encoding/json 遇到它们会整体失败，
-// 而调用方是"先写 200 再编码"，失败时客户端只会收到一个空响应体。
+// 字段必须全部可 JSON 序列化。不要在这里放 func / chan —— encoding/json
+// 遇到它们会整体失败。
 //
-// Profile 是"最近一次请求解析出的 profile"的**观测记录**，供 session_list
-// 展示；它不是鉴权依据。同一个 Mcp-Session-Id 可能被不同 token 复用，
-// 因此权限始终取本次请求的 token 解析结果（mcp.Identity.Profile）。
+// 不含 Profile：会话不携带权限，见本文件顶部说明。
 type State struct {
 	ID         string    `json:"id"`
-	Profile    string    `json:"profile"`
 	CreatedAt  time.Time `json:"createdAt"`
 	LastSeenAt time.Time `json:"lastSeenAt"`
 	Closed     bool      `json:"closed"`
@@ -37,16 +45,14 @@ type State struct {
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*State
-	cfg      *config.Config
 	audit    *audit.Logger
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
-func NewManager(cfg *config.Config, auditLogger *audit.Logger) *Manager {
+func NewManager(auditLogger *audit.Logger) *Manager {
 	m := &Manager{
 		sessions: make(map[string]*State),
-		cfg:      cfg,
 		audit:    auditLogger,
 		stopCh:   make(chan struct{}),
 	}
@@ -58,19 +64,18 @@ func NewManager(cfg *config.Config, auditLogger *audit.Logger) *Manager {
 //
 // 只应在处理 initialize 时调用。其余请求若没有携带有效的 Mcp-Session-Id，
 // 一律走无状态路径（不登记），否则不实现会话的客户端每发一个请求就会
-// 占用一个名额，很快撞上 MaxSessions 并被 -32014 拒绝。
-func (m *Manager) Create(profile string) (*State, error) {
+// 占用一个名额，很快撞上上限并被 -32014 拒绝。
+func (m *Manager) Create() (*State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if len(m.sessions) >= m.cfg.Session.MaxSessions {
+	if len(m.sessions) >= maxSessions {
 		return nil, ErrTooManySessions
 	}
 
 	id, _ := randomID()
 	s := &State{
 		ID:         id,
-		Profile:    profile,
 		CreatedAt:  time.Now(),
 		LastSeenAt: time.Now(),
 	}
@@ -79,7 +84,6 @@ func (m *Manager) Create(profile string) (*State, error) {
 	m.audit.Log(audit.Entry{
 		Event:   "session_create",
 		Session: id,
-		Profile: profile,
 	})
 
 	return s, nil
@@ -102,22 +106,6 @@ func (m *Manager) Touch(id string) {
 	m.mu.Lock()
 	if s, ok := m.sessions[id]; ok {
 		s.LastSeenAt = time.Now()
-	}
-	m.mu.Unlock()
-}
-
-// SetProfile 记录"本次请求把这个会话绑定到了哪个 profile"，仅供观测。
-//
-// 鉴权不读这个值：Mcp-Session-Id 由客户端自行携带，同一个 id 可能被不同
-// token 复用，所以权限必须每次请求重新按 token 解析。这里写入只是让
-// session_list 能显示会话当前的归属。
-func (m *Manager) SetProfile(id, profile string) {
-	if profile == "" {
-		return
-	}
-	m.mu.Lock()
-	if s, ok := m.sessions[id]; ok {
-		s.Profile = profile
 	}
 	m.mu.Unlock()
 }
@@ -161,11 +149,7 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) sweepLoop() {
-	interval := time.Duration(m.cfg.Session.SweepIntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = 5 * time.Minute
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 
 	for {
@@ -180,12 +164,11 @@ func (m *Manager) sweepLoop() {
 
 func (m *Manager) sweep() {
 	now := time.Now()
-	idle := time.Duration(m.cfg.Session.IdleTimeoutSeconds) * time.Second
 
 	m.mu.Lock()
 	expired := []string{}
 	for id, s := range m.sessions {
-		if now.Sub(s.LastSeenAt) > idle {
+		if now.Sub(s.LastSeenAt) > idleTimeout {
 			expired = append(expired, id)
 		}
 	}

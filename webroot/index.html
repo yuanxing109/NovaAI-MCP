@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NovaAI-MCP</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-title">
+    <strong>NovaAI-MCP</strong>
+    <span id="svc" class="pill pill-unknown">检测中…</span>
+  </div>
+  <div class="bar-actions">
+    <input id="mcpPort" class="port" type="number" inputmode="numeric" min="1" max="65535" value="5322" aria-label="MCP 端口">
+    <button id="btnRefreshAll" class="btn btn-ghost" type="button">全部探测</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab is-active" data-tab="upstreams" role="tab" type="button">上游</button>
+  <button class="tab" data-tab="tools" role="tab" type="button">工具目录</button>
+  <button class="tab" data-tab="logs" role="tab" type="button">日志</button>
+</nav>
+
+<main>
+
+  <!-- ============ 上游管理 ============ -->
+  <section id="panel-upstreams" class="panel is-active">
+    <div id="upstreamBanner" class="banner is-hidden"></div>
+
+    <div id="upstreamList" class="cards">
+      <p class="muted">加载中…</p>
+    </div>
+
+    <details id="addBox" class="card">
+      <summary>➕ 添加上游</summary>
+      <form id="addForm" class="form">
+        <label>名称 <span class="hint">唯一标识，同时是工具名前缀；不能含 <code>__</code></span>
+          <input name="name" required pattern="[A-Za-z0-9_.\-]+" placeholder="other_app_mcp">
+        </label>
+
+        <label>类型
+          <select name="type" id="addType">
+            <option value="http">http（另一个 App 暴露的 MCP 端口）</option>
+            <option value="stdio">stdio（本机可执行文件）</option>
+          </select>
+        </label>
+
+        <div data-when="http">
+          <label>URL
+            <input name="url" placeholder="http://127.0.0.1:9999/mcp">
+          </label>
+          <div id="portHint" class="hint is-hidden"></div>
+        </div>
+
+        <div data-when="stdio" class="is-hidden">
+          <label>命令
+            <input name="command" placeholder="/data/local/tmp/some_mcp_binary">
+          </label>
+          <label>参数 <span class="hint">空格分隔；含空格请加引号</span>
+            <input name="args" placeholder="--port 8888">
+          </label>
+        </div>
+
+        <label>启动方式
+          <select name="launchType" id="addLaunchType">
+            <option value="manual">manual（不自动启动）</option>
+            <option value="intent">intent（用 am start 拉起一个 App）</option>
+            <option value="command">command（直接 spawn）</option>
+          </select>
+        </label>
+
+        <div data-launch="intent" class="is-hidden">
+          <label>包名
+            <input name="package" placeholder="com.example.app">
+          </label>
+          <label>Action <span class="hint">与 Activity 至少填一个</span>
+            <input name="action" placeholder="com.example.app.START_MCP">
+          </label>
+          <label>Activity
+            <input name="activity" placeholder="com.example.app.MainActivity">
+          </label>
+        </div>
+
+        <div data-launch="command" class="is-hidden">
+          <label>启动命令
+            <input name="launchCommand">
+          </label>
+          <label>启动参数
+            <input name="launchArgs">
+          </label>
+        </div>
+
+        <label>riskCeiling <span class="hint">0 或缺省 = 继承默认 3</span>
+          <input name="riskCeiling" type="number" min="0" max="3" value="3">
+        </label>
+
+        <label>denyTools <span class="hint">逗号分隔；可写裸名或带前缀名</span>
+          <input name="denyTools" placeholder="dangerous_tool, other__x">
+        </label>
+
+        <label class="check"><input name="enabled" type="checkbox" checked> 启用（参与工具聚合）</label>
+        <label class="check"><input name="autoLaunch" type="checkbox"> autoLaunch（调用时自动拉起）</label>
+        <label class="check"><input name="exposeWhenStopped" type="checkbox"> exposeWhenStopped（未运行时也暴露工具）</label>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" type="submit">保存并重载</button>
+          <button class="btn" type="reset">清空</button>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <!-- ============ 工具目录 ============ -->
+  <section id="panel-tools" class="panel">
+    <div class="toolbar">
+      <input id="toolSearch" class="search" type="search" placeholder="搜索工具名或描述…">
+      <button id="btnReloadTools" class="btn btn-ghost" type="button">刷新</button>
+    </div>
+    <div id="toolList" class="cards">
+      <p class="muted">加载中…</p>
+    </div>
+
+    <details class="card">
+      <summary>🧪 手动调用测试</summary>
+      <p class="hint">
+        直接以 MCP 客户端身份调用一次 tools/call —— 走的就是 daemon 的公开通路，
+        没有特权旁路。风险等级由服务端内部维护、不在 tools/list 里声明
+        （见 docs/extensions.md 2.2），因此这里不显示它；真正的准入判定在服务端。
+      </p>
+      <form id="callForm" class="form">
+        <label>工具
+          <select name="name" id="callTool"></select>
+        </label>
+        <label>arguments（JSON）
+          <textarea name="args" rows="4" spellcheck="false">{}</textarea>
+        </label>
+        <div class="form-actions">
+          <button class="btn btn-primary" type="submit">调用</button>
+        </div>
+      </form>
+      <pre id="callResult" class="result is-hidden"></pre>
+    </details>
+  </section>
+
+  <!-- ============ 日志 ============ -->
+  <section id="panel-logs" class="panel">
+    <div class="toolbar">
+      <select id="logFile" class="search"></select>
+      <label class="check"><input id="logOnlyUpstream" type="checkbox"> 只看上游事件</label>
+      <button id="btnReloadLogs" class="btn btn-ghost" type="button">刷新</button>
+    </div>
+    <pre id="logView" class="result">加载中…</pre>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span id="cfgPath" class="muted"></span>
+</footer>
+
+<div id="toast" class="toast is-hidden"></div>
+
+<script src="lib/kernelsu.js"></script>
+<script src="lib/mcp-client.js"></script>
+<script src="lib/config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

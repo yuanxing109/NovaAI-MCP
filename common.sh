@@ -6,7 +6,6 @@ ZCR_USER_DIR="/storage/emulated/0/novaaiAI"
 ZCR_PID_FILE="$ZCR_INTERNAL_DIR/novaaimcpd.pid"
 ZCR_LOG_FILE="$ZCR_INTERNAL_DIR/module.log"
 ZCR_CONFIG="$ZCR_INTERNAL_DIR/config.json"
-ZCR_TOKEN="$ZCR_INTERNAL_DIR/token"
 
 zcr_log() {
   mkdir -p "$ZCR_INTERNAL_DIR" 2>/dev/null

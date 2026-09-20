@@ -113,24 +113,37 @@ func checkShape(path string, want *shape, got any, problems *[]string) {
 	}
 }
 
-// extractJSONBlock 从 config.md 中取出第一个 ```json 围栏里的内容。
+// extractJSONBlock 从 markdown 中取出第一段**内容是合法 JSON** 的 ```json 围栏。
 //
 // 曾经的示例是独立文件 docs/config.example.json，与 config.md 是同一份
 // 契约的两个 owner，没有任何机制保证两者同步，必然漂移。现在只有
-// config.md 一份，这里把它挖出来仍然做逐键比对 ——
+// markdown 一份，这里把它挖出来仍然做逐键比对 ——
 // 少一个 owner，但不减一道闸门。
+//
+// 为什么是"第一段可解析的"而不是"第一段"：文档的散文里会**提到**围栏标记
+// 本身（例如"本页第一个 ```json 代码块是契约"），此时朴素实现会把散文里
+// 那几个字符当成围栏起点，取出半截正文。docs/upstream.md 就踩过这个坑，
+// 报错是 `invalid character '代'`。跳过不可解析的块是对付它的正解 ——
+// 顺带也让"文档里先放一段伪 JSON 说明形状"成为合法写法。
 func extractJSONBlock(raw string) ([]byte, error) {
 	const fence = "```json"
-	i := strings.Index(raw, fence)
-	if i < 0 {
-		return nil, errors.New("config.md 里找不到 ```json 代码块")
+	rest := raw
+	for {
+		i := strings.Index(rest, fence)
+		if i < 0 {
+			return nil, errors.New("找不到内容是合法 JSON 的 ```json 代码块")
+		}
+		rest = rest[i+len(fence):]
+		j := strings.Index(rest, "```")
+		if j < 0 {
+			return nil, errors.New("```json 代码块没有闭合")
+		}
+		block := []byte(rest[:j])
+		if json.Valid(block) {
+			return block, nil
+		}
+		rest = rest[j+3:]
 	}
-	rest := raw[i+len(fence):]
-	j := strings.Index(rest, "```")
-	if j < 0 {
-		return nil, errors.New("config.md 里的 ```json 代码块没有闭合")
-	}
-	return []byte(rest[:j]), nil
 }
 
 // loadDocExample 读取并解析 config.md 里的完整配置示例。
@@ -185,8 +198,6 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 	if err := json.Unmarshal(raw, &want); err != nil {
 		t.Fatalf("反序列化默认配置失败: %v", err)
 	}
-	// 示例里 value 留空，表示"首次启动生成"。
-	want["security"].(map[string]any)["token"].(map[string]any)["value"] = ""
 
 	diffJSON(t, "config", want, example)
 }

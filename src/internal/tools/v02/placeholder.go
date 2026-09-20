@@ -6,6 +6,7 @@ import (
 
 	"github.com/novaai/novaai-mcp/internal/adapter"
 	"github.com/novaai/novaai-mcp/internal/config"
+	"github.com/novaai/novaai-mcp/internal/upstream"
 )
 
 // Handler 与 tools.Handler 签名一致，通过回调避免循环依赖。
@@ -20,25 +21,32 @@ type Deps struct {
 	StateDir string
 	Version  string
 	Commit   string
+	// Upstreams 是上游 MCP 聚合注册表，可以为 nil（测试里常见）。
+	Upstreams *upstream.Registry
 }
 
-// RegisterAllV02Tools 注册 v0.02 的全部工具。
+// RegisterAllV02Tools 注册 v0.02 的工具。共 28 个（另有 2 个在 tools 包内
+// 直注册：novaai_health_status、novaai_upstream_status，合计 30，
+// 权威数量以 tools.Registry.Count() 为准）。
 //
-// 工具清单（权威数量以 tools.Registry.Count() 为准，这里不再写死数字）：
+// 工具清单：
 //
-//	服务/状态：    novaai_status, capabilities, config, diagnostics
-//	文件：         novaai_fs_info, fs_read, fs_write, fs_manage, fs_search, fs_hash
-//	归档/传输：    novaai_archive, download, transfer_upload, transfer_export
-//	执行：         novaai_shell, script
-//	应用：         novaai_app_list, app_info, app_install, app_manage, app_permission,
-//	               app_export, app_policy, default_app, notification
-//	Root：         novaai_root_info, root_module, systemless, backup
-//	系统：         novaai_process, service, property, setting
-//	设置：         novaai_display, audio, connectivity, locale_time, input_method,
-//	               developer, power, screen, input, accessibility
-//	设备/调度：    novaai_device_info, schedule
-//	网络/日志：    novaai_network, log
-//	技能：         novaai_skill
+//	服务：    novaai_status, capabilities, config, diagnostics
+//	文件：    novaai_fs_info, fs_read, fs_write, fs_manage, fs_search, fs_hash
+//	归档/传输：novaai_archive, download, transfer_upload, transfer_export
+//	执行：    novaai_shell, script
+//	应用：    novaai_app_list, app_info, app_install, app_manage
+//	系统：    novaai_process, log, screen, input, power
+//	Root：    novaai_root_info, root_module, systemless
+//
+// 被删除的工具（reverse_*、hook_*、skill、schedule、app_permission、
+// app_policy、app_export、default_app、notification、service、property、
+// setting、display、audio、connectivity、locale_time、input_method、
+// developer、accessibility、network、backup、device_info）一律走 novaai_shell。
+//
+// **上游 MCP 的工具不在这里注册**：它们的数量随用户配置动态变化，
+// 由 upstream.Registry.MergedTools() 在 tools/list 时实时合并，
+// 不进入本注册表，因此不参与 expectedToolCount 断言。
 func RegisterAllV02Tools(reg RegisterFn, deps *Deps) {
 	registerStatusTools(reg, deps)
 	registerFSTools(reg, deps)
@@ -48,8 +56,5 @@ func RegisterAllV02Tools(reg RegisterFn, deps *Deps) {
 	registerRootTools(reg, deps)
 	registerSysTools(reg, deps)
 	registerSettingTools(reg, deps)
-	registerDeviceTools(reg, deps)
 	registerNetLogTools(reg, deps)
-	registerSkillTools(reg, deps)
-	registerReverseTools(reg, deps)
 }

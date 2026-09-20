@@ -23,8 +23,8 @@ import (
 // 另写 60*time.Second —— 那样配置项就变成了摆设。
 func shellTimeout(deps *Deps) time.Duration {
 	sec := 60
-	if deps != nil && deps.Config != nil && deps.Config.Limits.ShellTimeoutSec > 0 {
-		sec = deps.Config.Limits.ShellTimeoutSec
+	if deps != nil && deps.Config != nil && deps.Config.ShellTimeoutSeconds > 0 {
+		sec = deps.Config.ShellTimeoutSeconds
 	}
 	return time.Duration(sec) * time.Second
 }
@@ -150,49 +150,22 @@ func shQuote(s string) string { return util.ShQuote(s) }
 
 // guardPath 在文件变更真正落地之前判定受保护路径。
 //
-// 通用文件载体（fs_write / fs_manage / archive / transfer_* / download /
-// backup restore）必须调用；专用 owner 不调用，因为它就是该位置的合法
-// 管理者：novaai_config 拥有 config.json，novaai_root_module 与
-// novaai_hook_* 拥有 /data/adb/modules。
+// 通用文件载体（fs_write / fs_manage / archive / transfer_* / download）
+// 必须调用；专用 owner 不调用，因为它就是该位置的合法管理者：
+// novaai_config 拥有 config.json，novaai_root_module 拥有 /data/adb/modules。
 //
 // recursive=true 时额外禁止整体递归删除 /data、/sdcard 这类根。
+//
+// 定性：这是**防手滑**，不是对抗攻击者。shell 可达时它全部可被绕过。
 func guardPath(p string, recursive bool) error {
 	return pathguard.Check(p, recursive).Err()
-}
-
-// guardPathConfirmed 与 guardPath 相同，但把 androidDataRoots 视为已确认。
-//
-// 只有调用方**已经拿到 confirmDangerous** 时才能用。
-func guardPathConfirmed(p string, recursive bool) error {
-	return pathguard.ConfirmCheck(p, recursive).Err()
-}
-
-// guardPathStrict 判定一次变更，并区分"硬拒绝"与"可确认档"。
-//
-// 返回的 confirmable 为 true 表示路径落在 /sdcard/Android/{data,obb}：
-// 默认拒绝，调用方在 confirmDangerous=true 时应改用 guardPathConfirmed 重试。
-//
-// 关于安全的诚实说明：confirmDangerous 是**模型自己填的布尔值**，
-// 无法证明真的发生过用户判断。在真实客户端里它通常被渲染成一个需要人
-// 点确认的提示，但那是客户端的善意，不是本服务能强制的。因此这一档提供
-// 的是"默认不会误删别的应用的数据"，而不是"对抗已沦为攻击者的模型" ——
-// 后者要靠 profile（把 token 绑到 readonly）。
-func guardPathStrict(p string, recursive bool) (err error, confirmable bool) {
-	d := pathguard.Check(p, recursive)
-	if d.Allowed {
-		return nil, false
-	}
-	if d.Confirmable {
-		return d.ErrConfirmable(), true
-	}
-	return d.Err(), false
 }
 
 // guardRead 判定一次**只读**访问。
 //
 // 读取刻意比写入宽松：/sdcard/Android/data 下的内容本来就该能读
-// （同一棵树上有用户自己的 DCIM、Download），stateDir 里的 config.json
-// 也一直可读。仍然拒绝读取的只有 /dev/block 这类块设备。
+// （同一棵树上有用户自己的 DCIM、Download）。仍然拒绝读取的只有
+// /dev/block 这类块设备。
 func guardRead(p string) error {
 	return pathguard.CheckRead(p).Err()
 }
@@ -210,12 +183,12 @@ var idRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // 否则同一个字符串在两处得到不同解释，防护就会出现缝隙。
 func resolvePath(deps *Deps, p string) string {
 	if p == "" {
-		return deps.Config.Paths.WorkspaceRoot
+		return deps.Config.WorkspaceRoot()
 	}
 	if strings.HasPrefix(p, "/") {
 		return p
 	}
-	return path.Join(deps.Config.Paths.WorkspaceRoot, p)
+	return path.Join(deps.Config.WorkspaceRoot(), p)
 }
 
 func suPrefix() string {
@@ -244,4 +217,27 @@ func encodeBase64(data []byte) string {
 
 func decodeBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
+}
+
+// itoa 是 strconv.Itoa 的包内实现，避免为一个整数格式化引入 import。
+func itoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }

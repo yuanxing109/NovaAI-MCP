@@ -103,6 +103,7 @@ build_zip() {
   #                        （wrapper 与 daemon 都直接读模块内这一份，不再复制到状态目录）
   #   bin/wrappers/*       安装到 PATH 的 wrapper（apktool/jadx/smali/baksmali/dexdump/sqlite3）
   #   skills/*.md          安装到状态目录的技能文件
+  #   webroot/*            KernelSU WebUI（须含 index.html）
   for arch in arm64-v8a armeabi-v7a x86_64; do
     if [ -f "$BIN_DIR/$arch/7zz" ]; then
       cp "$BIN_DIR/$arch/7zz" "$STAGE/bin/$arch/"
@@ -119,6 +120,18 @@ build_zip() {
   if [ -d "$ROOT_DIR/skills" ]; then
     mkdir -p "$STAGE/skills"
     cp "$ROOT_DIR/skills/"*.md "$STAGE/skills/"
+  fi
+  # WebUI：KernelSU 只认模块根目录的 webroot/，且必须存在 index.html，
+  # 否则模块页面入口不出现。权限与 SELinux context 由 KernelSU 自动设置，
+  # 因此这里不做 chmod（也**不要**把 webroot 加进可执行矩阵）。
+  if [ -d "$ROOT_DIR/webroot" ]; then
+    if [ ! -f "$ROOT_DIR/webroot/index.html" ]; then
+      echo "错误: webroot/ 存在但没有 index.html，KernelSU 不会显示模块页面"; exit 1
+    fi
+    mkdir -p "$STAGE/webroot"
+    cp -r "$ROOT_DIR/webroot/." "$STAGE/webroot/"
+  else
+    echo "错误: 缺少 $ROOT_DIR/webroot（KernelSU WebUI 入口）"; exit 1
   fi
 
   chmod 0755 "$STAGE"/*.sh "$STAGE"/bin/*/novaaimcpd

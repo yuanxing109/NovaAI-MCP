@@ -119,8 +119,14 @@ scripts/audit_shell.ps1 第 3 项 从 package_contract.ps1 提取矩阵，
 
 `scripts/*.ps1` 的五个脚本是为 Windows 写的（`$env:TEMP`、
 `Start-Process -WindowStyle`），在 Linux 上的行为**未经验证**。与其在 CI 里赌
-它们的可移植性，不如在它们已知全绿的平台上跑（26/26、13/13、8/8、审计全 0）。
+它们的可移植性，不如在它们已知全绿的平台上跑。
 移植到 Linux 是一件独立工作，见 [KNOWN_ISSUES 第 11 节](KNOWN_ISSUES.md)。
+
+> **本机怎么跑这几个脚本**：必须用 `pwsh`（PowerShell 7），**不能用
+> `powershell.exe`（5.1）** —— 后者把 BOM-less UTF-8 的 `.ps1` 按系统 ANSI 解析，
+> 中文注释会把紧随其后的引号吃掉，7 个脚本全部语法报错。
+> 各脚本当前的通过数以 [KNOWN_ISSUES 第 9 节](KNOWN_ISSUES.md) 为准 ——
+> 那里是**唯一**记着这些数字的地方，不要在这里再抄一份。
 
 `bash -n` 之所以放在 ubuntu 的 `verify` 里，是因为那里有**真** bash；
 `audit_shell.ps1` 第 7 项在 Windows 上只能做关键字配平（配平 ≠ 语法正确）。

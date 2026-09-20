@@ -33,13 +33,12 @@ func captureTools(t *testing.T) []toolUnderTest {
 	t.Helper()
 
 	cfg := config.Default()
-	cfg.Paths.StateDir = t.TempDir()
-	cfg.Paths.WorkspaceRoot = t.TempDir()
+	cfg.StateDir = t.TempDir()
 
 	deps := &Deps{
 		Config:   cfg,
 		Adapter:  adapter.NewAOSPAdapter(map[string]string{}),
-		StateDir: cfg.Paths.StateDir,
+		StateDir: cfg.StateDir,
 		Version:  "test",
 	}
 

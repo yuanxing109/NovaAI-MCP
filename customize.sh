@@ -204,10 +204,21 @@ ui_print "========================================="
 ui_print ""
 ui_print "- MCP 地址: http://127.0.0.1:5322/mcp"
 ui_print "- Unix Socket: $OLD_STATE_DIR/mcp.sock"
-ui_print "- Token 文件: $OLD_STATE_DIR/token"
+ui_print "- 鉴权: 无（局域网直连）"
 ui_print "- 配置文件: $OLD_STATE_DIR/config.json"
 ui_print "- 技能目录: $OLD_STATE_DIR/skills/"
 ui_print "- 工具目录: $MODDIR/bin/tools/"
+# WebUI 只对 KernelSU 可见：它按模块根目录的 webroot/index.html 提供入口。
+# Magisk / APatch 没有等价机制，检查一下只是为了让打包缺陷在装的时候就暴露。
+if [ -f "$MODDIR/webroot/index.html" ]; then
+  if [ "$FRAMEWORK" = "KernelSU" ]; then
+    ui_print "- WebUI: 在 KernelSU 管理器里点本模块的「打开」进入"
+  else
+    ui_print "- WebUI: 需要 KernelSU（当前框架 $FRAMEWORK 不提供模块页面）"
+  fi
+else
+  ui_print "! 警告: 缺少 webroot/index.html，WebUI 不可用"
+fi
 ui_print ""
 if [ "$IS_UPDATE" = "true" ]; then
   ui_print "- 更新说明："

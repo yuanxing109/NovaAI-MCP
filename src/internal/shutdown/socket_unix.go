@@ -1,6 +1,6 @@
 //go:build !windows
 
-package auth
+package shutdown
 
 import (
 	"syscall"

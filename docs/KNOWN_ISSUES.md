@@ -3,7 +3,12 @@
 本文记录**当前状态下确实存在**的限制、待决策项与残余风险。
 与 `security.md`（说明防护模型）互补：那里讲"挡什么"，这里讲"还差什么"。
 
-最后更新：v0.05 之后的清理轮（第四轮：GitHub 构建与发布流水线）
+最后更新：上游 MCP 聚合 + KernelSU WebUI 轮（第九轮：聚合网关）
+
+> **第 1–12 节记录的是第八轮精简重构**之前的各轮排查，
+> 其中涉及鉴权、多 profile、来源判定、`confirmDangerous`、61 个工具的段落
+> 已不再描述当前行为 —— 保留它们是为了留下"为什么当初这样做"的痕迹。
+> **当前状态以第 13、14 节为准。**
 
 ---
 
@@ -50,6 +55,11 @@ CI 用**同一个** `verify_package.ps1` 校验 `build.sh` 的产物。
 > 错的，实际只有 `bin/*/7zz` 一类 3 个文件。
 
 ## 2. 配置字段：本轮清理 21 个无消费者字段
+
+> **本节是历史记录。** 其中提到的 `migrate.go` 与 `config.example.json`
+> 已在第八轮删除；`types.go` / `default.go` 的字段集合也已重写为 8 个键
+> （见 [config.md](config.md)）。下面保留的是"当初怎么判定零消费者"的方法，
+> 它比结论更有价值。
 
 清理前 `config.json` 有 21 个字段既不被 Go 读取、也不被 shell 读取，
 但 `types.go` 声明、`default.go` 赋默认值、`migrate.go` 写入，
@@ -262,13 +272,16 @@ out of range [1:0]`，一个把真正原因藏起来的错误。删除 `route` /
 
 ## 6. 会话与限流的残余限制
 
-- `session.maxSessions`（默认 32）达到后返回 `-32014`。现在只有带
-  `Mcp-Session-Id` 或含 `initialize` 的请求占用名额，无状态客户端不再消耗。
-  但**真正创建 32 个会话的客户端**仍会被挡到空闲超时（默认 30 分钟）。
+> 本节第 3 条已在本轮失效：按 token 哈希计数的第二层限流已删除。
+
+- 会话数上限（32）达到后返回 `-32014`。只有带 `Mcp-Session-Id` 或含
+  `initialize` 的请求占用名额，无状态客户端不消耗。但**真正创建 32 个会话
+  的客户端**仍会被挡到空闲超时（30 分钟）。
 - `http.Server.WriteTimeout` 为 0（无上限）。单个慢客户端可以长期占住连接；
   这是为了让长时工具调用不被中断。未做按工具区分的写超时。
-- 限流第二层按 **token 哈希**计数，无 token 的入口（unix socket、
-  匿名 loopback）共用一个 `local` 桶 —— 同一设备上的本地调用方之间不隔离。
+- ~~限流第二层按 token 哈希计数，无 token 的入口共用 `local` 桶~~ ——
+  **已删除**：所有来源本来就是同一个身份（无 token、不分来源），
+  多一个维度只是多一处可被误读的状态。现在只有全局 / shell / 并发三层。
 
 ## 7. 版本控制
 
@@ -311,44 +324,81 @@ out of range [1:0]`，一个把真正原因藏起来的错误。删除 `route` /
 
 三个探针脚本都是**自举**的：自行构建 daemon、生成隔离 state 目录、结束时清理，
 不需要设备，也不依赖本机 `go` 在 PATH 上（用 `-GoExe` 指定）。
+**本服务不鉴权**，所以三个探针都不带认证头（旧的 `-Token` 参数已删）。
 
-| 脚本 | 覆盖 | 当前结果 |
-|------|------|----------|
-| `scripts/probe_mcp.ps1` | 协议合规：initialize 协商、通知无响应体、tools/list 数量、content 包装、错误码、批量、鉴权、Host/Origin、限流、会话复用、profile 门禁、pathguard | 26/26 |
-| `scripts/probe_session.ps1` | 会话四类行为：`session_list` 可编码、限流身份不可伪造、无状态请求不占名额、上限自愈 | 13/13 |
-| `scripts/probe_limits.ps1` | `resultPreviewBytes` 截断语义与 `=0` 不限制 | 8/8 |
-| `scripts/audit_actions.ps1` | 静态契约审计（5 项检查，见第 5 节） | 全 0 |
-| `scripts/audit_shell.ps1` | 模块侧静态审计（8 项检查，见第 10 节） | 全 0 |
-| `scripts/verify_package.ps1` | 模块 ZIP 产物的权限位与宿主字段（唯一实现，见第 1 节） | 通过 |
+| 脚本 | 覆盖 |
+|------|------|
+| `scripts/probe_mcp.ps1` | 协议合规：initialize 协商、通知无响应体、tools/list 数量、content 包装、错误码、批量、无鉴权通路、Host/Origin、限流、会话复用、default 档位放行、pathguard（含 Android/data 硬拒绝） |
+| `scripts/probe_session.ps1` | 会话五类行为：分配与复用、无状态请求不占名额、上限 32 生效、会话不携带权限、批量隔离 |
+| `scripts/probe_limits.ps1` | `resultPreviewBytes` 截断语义与 `=0` 不限制 |
+| `scripts/audit_actions.ps1` | 静态契约审计（5 项检查，见第 5 节） |
+| `scripts/audit_shell.ps1` | 模块侧静态审计（8 项检查，见第 10 节） |
+| `scripts/verify_package.ps1` | 模块 ZIP 产物的权限位与宿主字段（唯一实现，见第 1 节） |
 
-另有三组 Go 测试承担脚本覆盖不到的部分：
+> **本机实测结果（2026-09-21，Windows / pwsh 7.6.6）**
+>
+> | 脚本 | 结果 |
+> |------|------|
+> | `probe_mcp.ps1` | **47 PASS / 0 FAIL** |
+> | `probe_session.ps1` | **10 PASS / 0 FAIL** |
+> | `probe_limits.ps1` | **8 PASS / 0 FAIL** |
+> | `audit_actions.ps1` | 全部通过（exit 0） |
+> | `audit_shell.ps1` | 全部通过（8/8） |
+> | `verify_package.ps1` | 通过（61 条目 / 19 可执行 / host=3:61） |
+>
+> 这六个数是**本机真跑出来的**，不再是"以 CI 为准"的占位。
+
+> **上一轮那句"本机只有 Windows PowerShell 5.1、跑不了 .ps1"是错的。**
+> `pwsh` 7.6.6 一直装着，只是落在 `WindowsApps` 应用执行别名里
+> （`%LOCALAPPDATA%\Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe`），
+> 没有被 Bash 工具的 PATH 解析到，于是当时据"`Get-Command pwsh` 没结果"下了结论 ——
+> **那一步没有验证到底，是"无法验证"被当成了"不存在"**。
+>
+> 与之一并纠正的还有两条由此衍生的做法：
+>
+> - 当时只用"UTF-8 读取 + 解析器"校验脚本语法，并另写临时 bash 脚本打
+>   `curl` 来代替探针。**探针能跑就不该用替代品** —— 替代品只覆盖协议面，
+>   覆盖不了 `probe_session` 的会话上限、`probe_limits` 的截断语义这些
+>   需要精确构造请求的项。
+> - 由此得出的"两个一致性缺口"结论里，有一条（探针未验证）已作废；
+>   另一条（`--state` 与 `config.stateDir` 两个 owner）仍然成立。
+>
+> **仍然成立**：`powershell.exe` 5.1 直接执行 BOM-less UTF-8 的 `.ps1`
+> 会语法崩（本机实测 7/7 全部报错，中文注释吃掉紧随其后的引号）。
+> 所以跑这些脚本**必须用 `pwsh`**，不能退回 `powershell.exe`。
+> 详见第 15.2 节。
+
+另有一组 Go 测试承担脚本覆盖不到的部分：
 
 - `src/internal/tools/v02/helpers_test.go` —— `shellTimeoutSeconds` 是默认超时的
   唯一来源（Windows 无 `/system/bin/sh`，无法端到端观察超时）。
-- `src/internal/tools/register_test.go` —— 工具总数断言（61）。
-- `src/internal/tools/v02/actions_test.go` —— 未知/缺失 action 的负向回归；
-  第三轮新增 `follow` 不得出现在 `novaai_log` schema 的断言。
+- `src/internal/tools/register_test.go` —— 本地工具总数断言（**30**），
+  以及"被裁掉的工具不允许留在注册表里"的负向清单。
+  上游工具**不**计入（数量随配置变化）。
+- `src/internal/mcp/no_auth_test.go` —— 无鉴权通路与 Host/Origin 拒绝边界。
+- `src/internal/mcp/guard_e2e_test.go` —— Host/Origin + pathguard 的端到端。
+- `src/internal/mcp/upstream_test.go` —— tools/list 合并、tools/call 转发、
+  上游策略拒绝转 isError、`-32015` 边界、`novaai_upstream_status`。
+- `src/internal/upstream/*_test.go` —— 上游包本体（22 个用例）：
+  HTTP 连接、stdio spawn 与超时杀进程、命名空间与最长前缀路由、
+  四态探测、断开隔离、热重载与子进程回收、exposeWhenStopped、autoLaunch、
+  denyTools / riskCeiling。
+- `src/internal/session/manager_test.go` —— 会话对象**不含 Profile 字段**
+  （会话不携带权限）。
+- `src/internal/profile/profile_test.go` —— `default` 放行全部工具。
+- `src/internal/pathguard/pathguard_test.go` + `android_data_test.go` ——
+  硬拒绝前缀与 `/sdcard/Android/{data,obb}` **硬拒绝**（无确认放行）。
+- `src/internal/config/{validate,paths,example,upstream}_test.go` ——
+  配置字段与 `docs/config.md` 逐键一致、上游配置的启动校验、
+  以及 `docs/upstream.md` 示例与 `UpstreamConfig` 逐键一致且**能通过 Validate**。
 - `src/cmd/novaaimcpd/main_test.go` —— PID 文件必须记录**本进程** PID（0600），
-  且文件名与 `common.sh` 的 `ZCR_PID_FILE` 一致。这是 G2 的回归防线。
-- `src/internal/tools/v02/reverse_test.go` —— `apktool.jar` 必须从可执行文件
-  位置推导，且**不得**再指向状态目录副本。这是 G4 的回归防线。
-- `src/internal/config/example_test.go` —— `docs/config.md` 里「完整配置」一节
-  的键集合必须与 `Config` 的 json tag **完全一致**，取值必须与 `Default()`
-  一致，且示例里不允许出现"保留字段"式说明。
-  这是对 `crashDir` / `capabilities` 那类漂移的结构化防线：按名字做全仓文本
-  计数会假阴性，键集合比对不会。
-
-  > **追记（本轮）**：`docs/config.example.json` 已删除，其内容并入
-  > `docs/config.md`。删它的理由是它构成了**同一份契约的第二个 owner**——
-  > 与 `config.md` 并存时没有任何机制保证两者同步。测试改为从 markdown
-  > 的 ```json 围栏里取示例，闸门一道没少，owner 少了一个。
-  > 随之新增的取值比对当场抓到一个真实缺陷：`default.go` 用
-  > `filepath.Join` 拼接 Android 路径，在 Windows 上产出反斜杠
-  > （详见第 10 节）。
+  且文件名与 `common.sh` 的 `ZCR_PID_FILE` 一致。
+- `src/internal/tools/v02/actions_test.go` —— 未知/缺失 action 的负向回归。
 
 > `audit_actions.ps1` 只扫描 `src/internal/tools`，因此它的"扫描工具数"
-> 是 56（v02 全部），不含 `internal/tools` 下用 `reg.Register(&Tool{...})`
-> 直注册的 5 个。工具总数以 `register_test.go` 的断言为准（61）。
+> 是 28（v02 全部），不含 `internal/tools` 下用 `reg.Register(&Tool{...})`
+> 直注册的 2 个（`novaai_health_status`、`novaai_upstream_status`）。
+> 工具总数以 `register_test.go` 的断言为准（30）。
 
 ## 10. 模块生命周期脚本（第三轮清理）
 
@@ -515,7 +565,13 @@ dev 通道从第二次起才有输出。
 现在：回退到 `default`（真实存在、可审计），并且在 `config.Validate` 里
 **启动即拒绝**悬空的 profile 引用 —— 拼写错误不该留到运行时才静默换档位。
 
-### 12b. 危险安全组合无校验（已修）
+### 12b. 危险安全组合无校验（已修；其后随开关一并删除）
+
+> **第八轮补记**：本节列的三个组合（`anonymous` / `validateHost` /
+> `validateOrigin` / `allowCors`）**已全部不存在** —— 那些开关、以及
+> `Validate` 里的组合校验，在精简重构中一起删掉了。配置里已经没有可以
+> "组合出错"的字段（见 [config.md](config.md) 的「非法配置」一节）。
+> 本节保留的是当时的判定依据：**组合校验不可能靠逐字段检查发现**。
 
 `Validate` 原本只查 4 件事。它**已经**正确地拒绝了一个危险组合
 （`lan.enabled` + `!token.enabled`），但对同类组合完全缺失：
@@ -550,6 +606,10 @@ dev 通道从第二次起才有输出。
 
 ### 12d. `/sdcard/Android/{data,obb}` 此前**完全可写**（本次新增保护）
 
+> **第八轮变更**：本节的"可确认档"已取消。该位置现在是**硬拒绝**，
+> `confirmDangerous` 参数已从所有工具 schema 与 handler 中删除。
+> 理由与影响见第 13.5 节。下面保留的是"为什么需要保护它"的推理。
+
 `pathguard` 里原本没有任何一条 `Android/data` 规则。三层判定
 （`fixedDeny` / `criticalRoots` / `stateDir`）对
 `/sdcard/Android/data/com.x/` 全部不匹配，因此 `novaai_fs_write`、
@@ -575,11 +635,10 @@ dev 通道从第二次起才有输出。
   真实客户端通常把它渲染成需要人点确认的提示，但那是客户端的善意，
   不是服务端的保证。因此这一层提供的是"默认不会误删别的应用的数据"，
   **不是**"对抗已沦为攻击者的模型"。对抗后者要靠 profile。
-- **`archive` / `transfer_upload` / `download` 尚未接入可确认档**。它们
-  经过 `guardPath`，因此对 `Android/data` 的写入会被**硬拒绝**（比只读更严，
-  不构成安全缺口），但用户也无法通过确认放行。接入方式与
-  `fs_write` / `fs_manage remove` 相同，待这些工具补齐 `confirmDangerous`
-  参数后一并处理。
+- ~~**`archive` / `transfer_upload` / `download` 尚未接入可确认档**。~~ ——
+  **不再适用**：可确认档已取消，这些工具对 `Android/data` 的写入与其他
+  位置一样是硬拒绝（`PROTECTED_PATH`），不再有"待补齐 confirmDangerous"
+  这个待办。
 
 ### 12e. 读取守卫（本次新增）
 
@@ -594,11 +653,374 @@ dev 通道从第二次起才有输出。
 当场纠偏过一次 —— 初版复用了 `fixedDeny`，被
 `TestCheckReadAllowsEverythingOrdinary` 判为过度收紧。
 
-### 12f. 未做的事
+### 12f. 未做的事（已失效）
 
-- **限流没有删，也不建议删。** `qps <= 0` 与 `maxConcurrentTools <= 0`
-  已经是"关闭"开关（`bucket.allow` 与 `AcquireSlot` 都直接放行），
-  改配置即可，不需要动代码。
-- **token 认证对局域网不可关闭。** `anonymous` 只对 loopback 生效，
-  且 `Validate` 强制 `lan.enabled` 必须配 `token.enabled`。这是有意的：
-  「局域网自己用」恰恰是 token 最该开着的场景。
+- ~~**限流没有删，也不建议删。**~~ —— 有效。`qps <= 0` 与
+  `maxConcurrent <= 0` 仍是"关闭"开关（`bucket.allow` 与 `AcquireSlot`
+  都直接放行），改配置即可，不需要动代码。
+- ~~**token 认证对局域网不可关闭。**~~ —— **已失效**：token 与 `lan.enabled`
+  已整体删除，本服务不再鉴权。见第 13 节。
+
+---
+
+## 13. 第八轮：精简重构的残余风险（当前状态）
+
+本轮删掉了 token、LAN 区分、来源判定、多 profile、`confirmDangerous`、
+配置迁移、按身份的限流层，工具从 61 个裁到 29 个（第九轮因上游聚合
+又加回 1 个观测工具，现为 **30**）。
+**权限边界因此完全落在"网络可达性"上。** 以下六条是接受的代价，
+不是待修的缺陷。
+
+### 13.1 同网段任何设备可 root shell
+
+默认 `listen: "0.0.0.0:5322"`，**无鉴权**。同一个 WiFi 上的任何设备 ——
+家里的 IoT、访客手机、被入侵的路由器 —— 都能调用 `novaai_shell`，
+那是一个以 root 身份运行的任意命令执行口子。
+
+**前提是家里 WiFi 可信、设备不暴露公网。** 这是使用前必须确认的唯一一件事。
+
+### 13.2 不要暴露公网
+
+- 不要在路由器上做 `5322` 的端口转发。
+- 不要在咖啡厅 / 酒店 / 公司 / 展会 WiFi 上开着它。
+- 想只给自己用：`listen` 改成 `127.0.0.1:5322`（本机 + 数据线可达），
+  或只留 Unix socket。
+
+### 13.3 `anonymous` 配置项已移除，所有来源一视同仁
+
+不再区分 loopback 与局域网，也不再有"本机免 token、局域网要 token"这条
+曾经的权限边界（ADR-004 的方案已废弃）。Host/Origin 是**唯一**还在做的
+来源校验，而它只挡浏览器。
+
+### 13.4 shell 是万能绕过
+
+`pathguard` 与 `antibrick` 只防手滑，不防恶意调用方。只要 `novaai_shell`
+可达，`P=/system; echo x > $P/build.prop`、`base64 -d | sh`、
+`echo / | xargs rm -rf` 都能绕过它们。`antibrick` 头部已写明**冻结**，
+不再为新的绕过形式追加规则。
+
+### 13.5 `confirmDangerous` 已移除，`androidDataRoots` 为硬拒绝
+
+`/sdcard/Android/{data,obb}`（及其全部别名）现在**硬拒绝**，没有任何
+确认放行通道。这是有意的：`confirmDangerous` 是模型自己填的布尔值，
+无法证明真的发生过用户判断，而 shell 可达时它拦不住任何有动机的调用方 ——
+保留它只增加状态与心智负担。
+
+**确需访问 `/sdcard/Android/{data,obb}`，走 `novaai_shell`。**
+可见性与安全性在这里是**分开**的：通用文件/归档工具被挡，shell 不挡。
+
+### 13.6 Host / Origin 校验不防直接内网访问
+
+`hostMiddleware` 只校验 Host 头是不是 IP 字面量或 `localhost`，
+**不校验来源 IP**。它防的是浏览器 DNS-rebinding（恶意网页把你的域名
+解析到 `127.0.0.1`），**不能阻挡 Python / Go / curl 直接用内网 IP 访问**。
+
+后者已在 13.1 里被明确接受。
+
+### 13.7 本轮引入的两处一致性缺口（记录）
+
+- **`--state` 参数与 `config.stateDir` 是两个 owner。** 审计目录
+  （`cfg.AuditDir()`）与 `pathguard` 的保护前缀取自 `config.stateDir`，
+  而 PID 文件、崩溃目录、工作目录取自 `--state`。设备上二者默认同值
+  （`/data/adb/novaai-mcp`），因此不可见；但在开发机上会产生
+  "配置说一个目录、进程用另一个"的现象。**未修**（不在本轮范围内）。
+- **`skills/*.md` 已无工具读取。** `novaai_skill` 被裁掉后，随模块分发的
+  5 个技能文档不再有消费者，只能由人或 `novaai_fs_read` 直接读。
+  本轮已把其中的工具名更新到现有工具集（否则会教客户端调用不存在的工具），
+  但**这批文件是否保留本身需要一次决策**：要么删掉、要么给它们一个新的
+  入口（例如并入 `instructions`）。第 13.7 条与这一条都属于"重构留下的
+  半成品"，不是 bug。
+
+---
+
+## 14. 第九轮：上游 MCP 聚合 + KernelSU WebUI
+
+本轮把服务从"一个工具箱"扩成"聚合网关"：新增 `internal/upstream/`
+（HTTP / stdio 两种上游、四态状态、命名空间合并、路由转发、懒启动）与
+`webroot/`（KernelSU 页面）。工具数 29 → **30**（新增
+`novaai_upstream_status`）。
+
+### 14.1 上游的安全边界（必须知道的三条）
+
+1. **上游 MCP 的安全性由上游自己负责。** 本服务只转发，不覆盖上游的鉴权，
+   也无法验证上游声称的工具描述是真的。
+2. **`stdio` 上游是以 root 身份 spawn 的任意可执行文件。** 与
+   `novaai_shell` 同级的能力 —— 能配一个 stdio 上游的人本来就能拿到 shell。
+   `launch.command` 直接 spawn（不经 shell、参数逐个传递），所以配置内容
+   不会变成注入点；但 `launch.intent` 会调 `am start`，同样等价于一次
+   任意命令执行。
+3. **上游工具继承全局 `default` 档位**（放行）。上游级控制只有
+   `denyTools` 与**粒度有限**的 `riskCeiling`：
+
+   `riskCeiling` 比较的是 `profile.ResolveRisk(工具名, action)` 推断出的
+   等级，而**未知工具名一律算 1**。所以 `riskCeiling >= 1` 等于没有限制，
+   `riskCeiling = 0` 又被当成"继承默认 3"（Go 的 int 无法区分 0 与缺省）。
+   **真正有效的上游级控制是 `denyTools`。** 这是本轮最容易被高估的一条，
+   写在 [upstream.md](upstream.md) 的字段表里。
+
+### 14.2 未运行的上游：工具表与状态是两件事
+
+`exposeWhenStopped: true` 时，暴露的是**上一次成功探测**拿到的工具列表 ——
+停止的服务不可能回答 `tools/list`。因此：
+
+- `status` 反映当前存活，`tools` 反映最后已知的 schema，**两者不共用一个
+  赋值**。第一版实现在探测失败时把 `e.tools` 一起清零，导致
+  "停过一次之后工具列表再也回不来"，被 `TestUpstream_ExposeWhenStopped` 抓到。
+- **从未成功探测过的上游，即使开了 `exposeWhenStopped` 也没有工具可暴露**
+  —— 不能凭空编造 schema。这不是缺陷，是定义。
+
+### 14.3 拉起的进程不由本服务托管
+
+`launch` 的语义是"把它拉起来"，不是"由我托管"。因此：
+
+- autoLaunch 起的进程不会随 daemon 退出而回收；
+- 它可能被 LMK 杀掉，那时状态会变回 `stopped`；
+- 这也意味着**测试里必须自己让假上游退出**，否则它会一直占着端口与
+  测试二进制的文件句柄（Windows 上表现为 `go test` 收尾时 unlinkat 失败）。
+  `fake_test.go` 的 `/__exit` 端点就是为此存在的。
+
+### 14.4 WebUI 的已知限制
+
+- **只在 KernelSU 上可用。** Magisk / APatch 没有等价的模块页面机制；
+  页面会显示"未检测到 KernelSU 桥"的横幅并降级为只读浏览。
+- **不显示风险等级。** 风险等级按既定契约不在 `tools/list` 里声明
+  （见 [extensions.md](extensions.md) 2.2），页面复刻一份等于制造第二个
+  owner。这是**有意接受的与方案原文的偏离**：方案要求工具目录显示风险等级，
+  但那样做要么改协议契约、要么复制风险表，两者都比"不显示"更糟。
+- **不做后台轮询。** 页面上的状态是快照，需要手动点「全部探测」。
+- **`file://` 下不用 ES module。** 静态 `import` 可能被 CORS 拦掉，
+  所以 `webroot/` 全部是经典脚本（挂全局），对 `kernelsu` 的导入是
+  运行时动态尝试。
+- **配置写入用单引号 heredoc。** 实测 `$HOME` 与 `` `id` `` 原样落盘、
+  未被求值；含真实换行的序列化结果会被拒绝（那样 heredoc 的终止条件不再可靠）。
+- **添加表单的校验是双份的**：页面那份只为人话提示，真正把关的是
+  `config.Validate`，两边规则不完全重合。
+
+### 14.5 本轮抓到的两个缺陷（记录）
+
+- **路由漏洞：`fake__` 被当成合法工具名。** `SplitName` 只检查了前缀，
+  没检查分隔符之后的工具名是否为空，于是 `fake__` 会带着一个空名字
+  一路转发给上游。修在 `merge.go`（空工具名直接判为"不是上游工具"），
+  由 `TestUpstream_RouteByPrefix` 与 `TestServerUnknownUpstreamPrefixIsToolNotFound`
+  双向锁住。
+- **文档契约测试被自己的散文骗过。** `docs/upstream.md` 的说明文字里
+  写了围栏标记本身，而取示例的 `extractJSONBlock` 只看"第一段 ```json"，
+  于是取到了半截散文，报错是 `invalid character '代'`。这与
+  KNOWN_ISSUES 第 5a / 11b 节是同一类（**检查器被检查对象以外的文本满足**）。
+  现在提取逻辑改为"取第一段**内容是合法 JSON** 的围栏"，
+  `config.md` 与 `upstream.md` 共用它。
+
+### 14.6 工具级 code 的"中文名"机制（本轮新增）
+
+工具级 `code`（`PROTECTED_PATH` 这类）保留英文 —— 它是给**程序**匹配的
+标识符，改了就是破约，下游（探针正则、别的语言写的客户端）全要跟着动。
+但读日志的人和 AI 需要看得懂，所以每个结果额外带一个稳定中文名：
+
+```json
+{"success": false, "code": "PROTECTED_PATH", "codeName": "路径受保护", "message": "..."}
+```
+
+唯一声明点是 `src/internal/tools/v02/codes.go` 的 `codeNames`（60 条），
+四个出口（`ok` / `okMsg` / `errFail` / `execResult`）自动附加。
+**数字错误码不参与** —— `-32015` 这类来自 JSON-RPC 2.0 与 MCP 生态的约定。
+
+`codes_test.go` 盯三个方向，并且**每个方向都做过变异测试**
+（删登记 / 加未登记 code / 改文档中文名 / 删文档行 / 加死条目 /
+给出口去掉装饰 —— 六种变异全部如期 FAIL，见第 9 节的说明）：
+
+| 方向 | 后果 |
+|---|---|
+| 代码里有 code 没登记 | 结果少 `codeName` |
+| 词表里有死条目 | 后来者照着它写分支 |
+| `docs/errors.md` 第 3 节与词表不一致 | 文档在教不存在的 code |
+
+顺带删掉了 `internal/tools/errors.go`：它的 `fail()` **零调用**，而且是
+`code` 的**第二个生产点** —— 留着它，将来谁用了它，那个结果的 code 就会
+静默绕过中文名表。同类的三处手写 `"code": "OK"` map（`app.go` 一处、
+`exec.go` 两处）收敛成了 `execResult`。
+
+> **`extensions.md` 4.3 里那张 code 表已删。** 它和 `errors.md` 第 3 节
+> 是同一份清单的两个 owner，没有任何机制保证同步。现在只讲字段语义 +
+> 指向 `errors.md`。
+
+### 14.7 仍未做
+
+- **上游聚合没有真机验证。** 本机（Windows）用测试二进制扮演上游跑通了
+  HTTP 与 stdio 两条路（见第 9 节的说明），但 `launch.intent` 需要
+  Android 的 `am`，**完全未验证**。
+- **没有上游的健康巡检。** 状态只在启动、`probe_upstreams`、以及调用
+  非 running 上游前刷新。一个 running 的上游中途死掉，在下次调用之前
+  不会被发现（调用时会失败并立刻重探，所以影响是"第一次调用失败"）。
+- **stdio 上游的输出没有独立的上限。** 读的是逐行 JSON，一行超长
+  （恶意或故障上游）会吃内存，只有 `bufio` 的 1 MiB 缓冲作为第一道；
+  HTTP 上游有 8 MiB 响应上限。
+- **`webroot/` 没有自动化测试。** 只做了 `node --check` 语法校验与
+  heredoc 写盘的实测；页面逻辑（DOM 渲染、事件）无覆盖。
+- **审计 `upstream_reload` 只记集合差异**，不记 `url` / `command` 的改动。
+  同一个上游换了地址再重载，审计里只会看到"上游集合未变"。
+- **`codeName` 只覆盖 v02 的工具。** `tools` 包直注册的两个工具
+  （`health_status`、`upstream_status`）返回体里**没有** `code` 字段，
+  因此也没有 `codeName`。要么给它们补上 `code: "OK"`，要么接受这个不一致 ——
+  现在是不一致状态，但至少 `codes_test.go` 会挡住"用另一个 code 生产点绕过去"。
+
+---
+
+## 15. 第十轮：第一次在本机跑通全部闸门
+
+这一轮的起点是"编译打包"，但真去跑构建之后，**六个闸门里有三个是坏的**。
+下面按"症状 → 根因 → 修法 → 如何证明修对了"记录。
+
+### 15.1 三个坏掉的闸门
+
+#### (a) `audit_shell.ps1` 第 5 项：读一个已被删除的文件
+
+**症状**：`audit_shell.ps1` exit=1，报 `Get-Content: 找不到路径 ...\v02\reverse.go`。
+
+**根因**：第 5 项断言 `reverse.go` 里出现 `apktoolJarPath()`，而 `reverse.go`
+随逆向工具在精简重构中被删。`Get-Content` 抛错后脚本终止
+（`$ErrorActionPreference='Stop'`）。
+
+**真正的危害不是这一项失败，而是第 6/7/8 项根本没跑过。**
+"检查器依赖被检查对象的某个具体文件"这类写法，被检查对象一改，检查器不是
+**失败**而是**消失** —— 后三项（update-binary 发现规则、shell 结构配平、
+CI 是否调用 build.sh）在上一轮之后一直处于无覆盖状态。
+
+**修法**：改指当前真实的不变量。Go 侧已不再解析任何 jar 路径
+（`grep -rn '\.jar' src --include=*.go` 为空），jar 的唯一消费者是
+`bin/wrappers/{apktool,baksmali,smali}`，它们直接 exec 模块内
+`/data/adb/modules/novaai.mcp/bin/tools/<name>.jar`。于是断言收敛为：
+
+1. 没有任何代码从**状态目录**读 jar（沿用旧断言）；
+2. Go 代码里不出现任何 jar 路径（新加，限定 `.go`）；
+3. 三个需要 jar 的 wrapper 必须指向模块内路径（新加）；
+4. `customize.sh` 不得把 jar 复制进状态目录（沿用旧断言）。
+
+顺带给 `Find-CodeHits` 加了 `-OnlyExtension`：**"Go 里不许出现 X" 与
+"任何文件里都不许出现 X" 是两个断言**，混用会把 `build.sh` / `customize.sh`
+里合法的 jar 引用一起报出来（第 2 条初版就是这么错的，当场被自己抓到）。
+
+#### (b) `probe_mcp.ps1` `[4] security.auth`：读错了 JSON 层级
+
+**症状**：`FAIL security.auth = none -> auth=`。
+
+**根因**：工具结果是 `{success, code, codeName, data}`，业务字段在 **`data`** 下。
+断言写成 `structuredContent.security.auth`，漏了 `data` 一层 → 永远拿到 `$null`
+→ **恒失败**。这条是上一轮改写探针时新写的，属自造。
+
+**修法**：改到 `structuredContent.data.*`，并顺手把这条**扩成一组**：
+除 `auth=none` / `profile=default` / `address.tcp` 外，新增三条"已删除的配置段
+不得回归"（`token` / `lan` / `sessionBinding`）。负向断言的前置条件
+（`data` 非空）写进条件本身 —— 否则 `data` 一旦缺失，这三条会因为"读不到东西"
+而恒真，正好是"永不失败的检查"。
+
+#### (c) `probe_mcp.ps1` `[8] 恶意 Host`：检查手段本身到不了线上
+
+**症状**：`FAIL 恶意 Host 被拒 (-32001)`，而报错详情里是一份**正常的
+tools/list 结果**。
+
+**定位过程**（这一步值得记，因为结论反直觉）：
+
+| 实验 | 结果 |
+|------|------|
+| 冷 `HttpClient` + `Headers.Host = evil.example.com` | 被拒 ✅ |
+| **预热过**的 `HttpClient` 改 `Host` | **放行** ❌ |
+| 预热 + `Connection: close` | 放行 ❌ |
+| 预热用旧客户端、改 Host 用**新**客户端 | 被拒 ✅ |
+| 原始 socket 手写 `Host: evil.example.com` | 被拒 ✅ |
+| 对照：Host 保持 `127.0.0.1` | 放行（符合预期）|
+
+**根因不在服务端**：`HttpRequestMessage.Headers.Host` 的覆盖在**连接池已经
+建立 keep-alive 连接之后到不了线上**。探针第 8 项之前已经发过十来发请求，
+所以那个域名从来没出现在报文里。旧版（HEAD 就有）一直踩这个坑 ——
+它是一条**恒失败**的检查，而 CI 的 `regression` job 失败即 `throw`，
+也就是说它一直在拦发布。
+
+**修法**：改用**手写 HTTP 报文走原始 socket**（`SendRaw`）。我们写什么字节，
+服务端就收到什么，不存在协议栈替我们做决定这回事。
+
+同时补上**对照**：同一个通道、合法 Host 必须放行。单边检查永远分不清
+"正确拒绝"与"整体坏掉"。
+
+并把 `Send()` 的 `hostOverride` 参数**停用**（传了就抛错）：PowerShell 的多余
+位置参数不会报错，若直接把参数删掉，将来传进来的 Host 会被 `$args` 静默吞掉，
+然后发出一个 Host 根本没改过的请求 —— 那正是这个 bug 的复发方式。
+
+### 15.2 `pwsh` 一直装着（上一轮的结论是错的）
+
+上一轮断定"本机只有 Windows PowerShell 5.1，跑不了 `.ps1`"，据此改用了
+"语法解析 + 临时 bash 打 curl"的替代验证。**这个前提是错的**：
+
+```
+%LOCALAPPDATA%\Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe
+=> 7.6.6
+```
+
+它落在 `WindowsApps` 应用执行别名里，没被 Bash 工具的 PATH 解析到。
+当时据"`Get-Command pwsh` 没结果"下了结论 —— 那一步没有再验证就当成结论了，
+属于本仓库的老毛病（第 11c 节：**未经检验就写进"刻意决定"**）。
+
+**仍然成立的部分**：`powershell.exe` 5.1 直接执行 BOM-less UTF-8 的 `.ps1`
+会语法崩（本机实测 7/7 全报错），所以这些脚本**必须用 `pwsh` 跑**。
+
+> 这条纠正连带作废了上一轮"探针未在本机验证"的结论。第 9 节已更新为
+> 本机实测的六个数（47 / 10 / 8 / 通过 / 8-of-8 / 通过）。
+
+### 15.3 `bin/` 下的入库资源被删了（打包会静默缺件）
+
+**症状**：`git status` 里 `bin/` 下 12 个**已入库**的文件（3 个 `7zz`、
+3 个 jar、6 个 wrapper，约 41 MB）处于 `D`（工作区已删、索引仍有）状态。
+
+**危害**：`build.sh` / `build.ps1` 对这些目录都是**条件复制**
+（`if [ -d ... ]` / `if (Test-Path ...)`），所以照现状构建**会成功**并产出一个
+**没有 7z、没有 apktool、没有 wrapper** 的包，而 `verify_package.ps1`
+只检查"存在的条目"的权限位，一样通过。**两道闸门都不报错。**
+
+**修法**：`git restore bin/` 恢复（41 MB，与索引一致）。本轮产物已包含全部 12 个。
+
+**嫌疑是 `build.ps1 clean`**：它的实现是 `Remove-Item -Recurse -Force $BinDir`，
+而 `bin/` 并不是纯产物目录 —— `.gitignore` 只忽略 `/bin/*/novaaimcpd`，
+其余（`7zz` / `tools/` / `wrappers/`）都是**版本化资产**。
+也就是说 `clean` 会连入库内容一起删掉，且删完不影响任何闸门的结论。
+
+> **待决**：`clean` 该只删 `bin/*/novaaimcpd` 与 `dist/`，还是干脆把
+> `bin/` 全量交给 git？倾向后者+一个显式 `--purge`，但这是行为变更，
+> 本轮未动。**在此之前，不要把 `clean` 当作安全的日常目标。**
+
+### 15.4 编码环境（回答"`.ps1` 什么时候能用"）
+
+| 解释器 | BOM-less UTF-8 的 `.ps1` | 本仓库能不能用 |
+|--------|--------------------------|----------------|
+| `powershell.exe` (5.1) | 按系统 ANSI（本机 CP936）解析，中文注释会吃掉引号 | **不能**，实测 7/7 语法报错 |
+| `pwsh` (7.x) | 按 UTF-8 | 能，`build.ps1` + 6 个脚本全部正常 |
+
+CI 用的 `pwsh`（`windows-latest` 自带），与本机一致，所以"本地绿 → CI 绿"
+这条链路在本轮第一次真正成立。
+
+### 15.5 本轮验证记录
+
+- `gofmt -l` 空 / `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿
+- **六个闸门本机实跑全绿**（数字见第 9 节）
+- **五个变异测试全部如期 FAIL**，逐条证明新检查有牙齿：
+
+| 变异 | 必须失败于 |
+|------|------------|
+| `novaai_status` 的 `security` 里塞回 `token` | `[4] 已删除的 security.token 未回归` |
+| `hostAllowed` 一律放行 | `[8] 恶意 Host 被拒` |
+| `SendRaw` 恒发域名 Host | `[8] 对照：同一通道合法 Host 放行` |
+| wrapper 指向状态目录 | `audit_shell` 第 5 项 |
+| （+ `codes` 那一组 6 个，见 14.6） | — |
+
+> 第三个变异是补做的。最初写的"让 `hostAllowed` 一律拒绝"**不算证据**：
+> 那样探针在 `[4]` 就会因 `$j.result` 为 `$null` 抛错终止，根本走不到 `[8]`。
+> **"某个变异让它失败了"不等于"失败的是我想验的那条断言"** ——
+> 这是第 5a / 11b 节同一类问题的第三种形态（前两种是：检查被无关文本满足、
+> 检查依赖的文本消失）。
+
+### 15.6 仍未做
+
+- `build.ps1 clean` 的破坏性未修（见 15.3，属行为变更，需先决策）。
+- 模块生命周期脚本（`customize.sh` / `service.sh` / `post-fs-data.sh` /
+  `uninstall.sh`）**依然没有自动化台架**：`audit_shell` 只做文本/结构比对，
+  第 7 项也只做关键字配平。本机跑通六个闸门**不等于模块装得上**。
+- `bin/` 下 41 MB 二进制与 jar 的来源、版本、校验方式均无记录
+  （本轮只是恢复，没有追溯它们是怎么进来的）。

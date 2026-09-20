@@ -293,7 +293,7 @@ func registerArchiveTools(reg RegisterFn, deps *Deps) {
 			src := resolvePath(deps, in.Path)
 			dst := in.Destination
 			if dst == "" {
-				dst = filepath.Join(deps.Config.Paths.WorkspaceRoot, "export",
+				dst = filepath.Join(deps.Config.WorkspaceRoot(), "export",
 					fmt.Sprintf("export-%d", time.Now().UnixNano()))
 			} else {
 				dst = resolvePath(deps, dst)

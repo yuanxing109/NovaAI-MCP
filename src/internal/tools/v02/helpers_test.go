@@ -21,7 +21,7 @@ func TestShellTimeoutFromConfig(t *testing.T) {
 		t.Errorf("未配置(0) 应兜底 60s: got %v", got)
 	}
 
-	cfg.Limits.ShellTimeoutSec = 7
+	cfg.ShellTimeoutSeconds = 7
 	if got := shellTimeout(&Deps{Config: cfg}); got != 7*time.Second {
 		t.Errorf("配置 7s: got %v, want 7s", got)
 	}
@@ -30,7 +30,7 @@ func TestShellTimeoutFromConfig(t *testing.T) {
 // 负数同样视为"未配置"，不能变成立即超时。
 func TestShellTimeoutNegativeFallsBack(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Limits.ShellTimeoutSec = -5
+	cfg.ShellTimeoutSeconds = -5
 	if got := shellTimeout(&Deps{Config: cfg}); got != 60*time.Second {
 		t.Errorf("负数应兜底 60s: got %v", got)
 	}

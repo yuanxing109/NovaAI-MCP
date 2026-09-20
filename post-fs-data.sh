@@ -13,6 +13,5 @@ zcr_prepare_internal || exit 0
 # 确保目录权限正确
 chmod 0700 "$ZCR_INTERNAL_DIR" 2>/dev/null
 chmod 0600 "$ZCR_CONFIG" 2>/dev/null
-chmod 0600 "$ZCR_TOKEN" 2>/dev/null
 
 exit 0

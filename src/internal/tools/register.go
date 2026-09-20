@@ -21,16 +21,17 @@ func RegisterAll(reg *Registry, deps *Deps) {
 			},
 		})
 	}, &v02.Deps{
-		Config:   deps.Config,
-		Adapter:  deps.Adapter,
-		StateDir: deps.StateDir,
-		Version:  deps.Version,
-		Commit:   deps.Commit,
+		Config:    deps.Config,
+		Adapter:   deps.Adapter,
+		StateDir:  deps.StateDir,
+		Version:   deps.Version,
+		Commit:    deps.Commit,
+		Upstreams: deps.Upstreams,
 	})
 
-	// v0.03 新增工具
-	registerAuthTools(reg, deps)
-	registerSessionTools(reg, deps)
-	registerAuditTools(reg, deps)
+	// 独立注册的工具（不经过 v02 回调通路）：
+	//   novaai_health_status
+	//   novaai_upstream_status
 	registerHealthTools(reg, deps)
+	registerUpstreamTools(reg, deps)
 }

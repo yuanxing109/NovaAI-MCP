@@ -1,18 +1,20 @@
 // Package pathguard 是「受保护路径」判定的唯一 owner。
 //
 // 为什么需要它：本模块以 root 身份直接操作文件的通用载体不止一个
-// （fs_write / fs_manage / archive / transfer_upload / shell / script /
-// backup restore）。如果每个工具各自维护一份黑名单，就会产生多个会互相
-// 漂移的 owner。因此判定收敛到本包，调用方只负责在变更真正落地之前调用
-// Check / CheckRecursiveDelete，被拒时返回 INVALID_PARAM。
+// （fs_write / fs_manage / archive / transfer_upload / shell / script）。
+// 如果每个工具各自维护一份黑名单，就会产生多个会互相漂移的 owner。
+// 因此判定收敛到本包，调用方只负责在变更真正落地之前调用 Check /
+// CheckRead，被拒时返回 INVALID_PARAM。
 //
 // 角色划分（重要，不是兼容垫片）：
 //   - 通用载体（fs_write、fs_manage、archive、shell…）必须过本包；
 //   - 专用 owner 不过本包，因为它就是该位置的合法管理者：
-//     novaai_config 拥有 config.json，novaai_root_module / novaai_hook_*
-//     拥有 /data/adb/modules。
+//     novaai_config 拥有 config.json，novaai_root_module 拥有 /data/adb/modules。
 //
 // 判据只有一条：这个操作是否可能让设备无法正常启动，且无法从系统内恢复。
+//
+// **定性：这是防手滑，不是对抗攻击者。** shell 口子开着，任何 pathguard
+// 拒绝都能被绕过。详见 docs/security.md。
 package pathguard
 
 import (
@@ -24,19 +26,15 @@ import (
 )
 
 // Decision 一次判定结果。Rule 只用于审计与错误信息，不参与控制流。
+//
+// 只有两种结果：允许或拒绝。曾经的第三态 Confirmable（默认拒绝、
+// 拿到 confirmDangerous 后可放行）已删除 —— 那是一个模型自己填的布尔值，
+// 不产生实质安全收益，只增加状态与心智负担。
 type Decision struct {
 	Allowed bool   `json:"allowed"`
 	Path    string `json:"path"` // 归一化后的路径
 	Rule    string `json:"rule,omitempty"`
 	Reason  string `json:"reason,omitempty"`
-
-	// Confirmable 为 true 表示：默认拒绝，但调用方可以在拿到**带外**
-	// 用户确认（confirmDangerous）后重试。见 ConfirmCheck。
-	//
-	// 它存在的理由：/sdcard/Android/data 既不是"永远不能动"（用户卸载
-	// 残留、清理某个应用的缓存都是正当需求），也不是"随便动"。
-	// 二分法（允许/拒绝）表达不了这一档，于是加了第三个状态。
-	Confirmable bool `json:"confirmable,omitempty"`
 }
 
 func (d Decision) Err() error {
@@ -46,16 +44,10 @@ func (d Decision) Err() error {
 	return fmt.Errorf("路径受保护（%s）：%s", d.Rule, d.Path)
 }
 
-// ErrConfirmable 是 Confirmable 场景下的错误，向调用方说明"加确认可过"。
-func (d Decision) ErrConfirmable() error {
-	return fmt.Errorf("路径受保护（%s）：%s —— 变更需用户确认（confirmDangerous）",
-		d.Rule, d.Path)
-}
-
 // rule 一条硬拒绝规则。
 //
 // allow 不是例外机制，而是角色限定：stateDir 整体必须受保护
-// （config.json / token / audit 不能被通用工具改写），但其中若干子树
+// （config.json / audit 不能被通用工具改写），但其中若干子树
 // 是 agent 的合法工作区。
 type rule struct {
 	prefix string
@@ -63,7 +55,7 @@ type rule struct {
 	why    string
 }
 
-// fixedDeny 与 stateDir 无关的硬拒绝前缀。
+// fixedDeny 是与 stateDir 无关的硬拒绝前缀。
 var fixedDeny = []rule{
 	// 分区：写入即可能无法启动，且系统内无法恢复
 	{prefix: "/system", why: "系统分区"},
@@ -93,22 +85,20 @@ var fixedDeny = []rule{
 	{prefix: "/data/adb/lspd", why: "LSPosed 自身"},
 	{prefix: "/data/adb/post-fs-data.d", why: "开机脚本目录"},
 	{prefix: "/data/adb/service.d", why: "开机脚本目录"},
-}
 
-// androidDataRoots 是「只读根」：读放行，任何变更默认拒绝。
-//
-// 与 fixedDeny 的区别是判据不同。fixedDeny 问的是"改了会不会开不了机"；
-// 这里问的是"改了会不会让别的应用丢数据、且用户无从察觉"。
-// Android/data 与 Android/obb 是**其他应用**的私有外部存储：
-// 以 root 写进去不会让设备变砖，但会静默破坏那个应用的状态，通常不可恢复。
-//
-// 必须覆盖全部别名，不能被符号链接绕过：在 /sdcard/Android 下，
-// data 与 obb 是指向 /storage/emulated/0/Android/{data,obb} 的符号链接，
-// 而 /mnt/sdcard 又是 /storage/emulated/0 的别名。只写一条会被另一条绕过。
-//
-// 与 fixedDeny 一样按路径分量比较，所以 /sdcard/Android/database
-// 不会被 /sdcard/Android/data 误伤。
-var androidDataRoots = []rule{
+	// 应用私有外部存储：**硬拒绝**（本轮从"可确认放行"收紧而来）。
+	//
+	// 判据与分区不同：写进去不会让设备变砖，但会静默破坏别的应用的
+	// 状态、通常不可恢复。既然 shell 可达时 confirmDangerous 拦不住
+	// 任何有动机的调用方，保留一个"模型自填的布尔值"只是幻觉；
+	// 直接硬拒绝更清晰。确需访问走 novaai_shell。
+	//
+	// 必须覆盖全部别名，不能被符号链接绕过：在 /sdcard/Android 下，
+	// data 与 obb 是指向 /storage/emulated/0/Android/{data,obb} 的符号链接，
+	// 而 /mnt/sdcard 又是 /storage/emulated/0 的别名。只写一条会被另一条绕过。
+	//
+	// 按路径分量比较，所以 /sdcard/Android/database 不会被
+	// /sdcard/Android/data 误伤。
 	{prefix: "/sdcard/Android/data", why: "应用私有外部存储"},
 	{prefix: "/sdcard/Android/obb", why: "应用私有 OBB 资源"},
 	{prefix: "/storage/emulated/0/Android/data", why: "应用私有外部存储"},
@@ -124,8 +114,9 @@ var androidDataRoots = []rule{
 // 为什么不是直接用 fixedDeny：那两个集合回答的是不同的问题。
 // fixedDeny 问"改了会不会开不了机"，所以它包含 /data/adb/modules ——
 // 但**读** module.prop 正是 agent 排查模块问题的正常手段，用写入规则去
-// 限制读取会砍掉真实能力（novaai_fs_read 目前完全没有守卫，收紧必须是
-// 有理由的收紧，而不是顺手扩大一个已有集合的适用范围）。
+// 限制读取会砍掉真实能力。
+//
+// 同理，/sdcard/Android/{data,obb} 的语义是"只能读不能动"：读是承诺的能力。
 //
 // 这里只留下"读它没有任何正当用途、且会把设备内容拖进工具结果"的位置。
 var readDeny = []rule{
@@ -213,23 +204,7 @@ func stateDirRule() rule {
 //
 // recursive 为 true 时额外应用 criticalRoots：删掉 /data、/sdcard 这类根
 // 等同于格机，即使它们本身不在 fixedDeny 里。
-//
-// 判定顺序有意如此：先 fixedDeny（不可协商），再 androidDataRoots
-// （默认拒绝但可确认），最后 stateDir。把可确认的一档放在硬拒绝之后，
-// 是为了让"某个路径同时命中两类规则"时取更严的那个。
 func Check(p string, recursive bool) Decision {
-	return check(p, recursive, false)
-}
-
-// ConfirmCheck 与 Check 相同，但把 androidDataRoots 视为已确认放行。
-//
-// 调用方只有在**已经拿到用户确认**之后才能用这个入口 —— 确认本身
-// 必须发生在模型够不着的地方，见各工具对 confirmDangerous 的处理。
-func ConfirmCheck(p string, recursive bool) Decision {
-	return check(p, recursive, true)
-}
-
-func check(p string, recursive, confirmed bool) Decision {
 	n := Normalize(p)
 	if n == "" {
 		return Decision{Allowed: true, Path: n}
@@ -251,13 +226,6 @@ func check(p string, recursive, confirmed bool) Decision {
 		return d
 	}
 
-	if !confirmed {
-		if d := matchRules(n, androidDataRoots); !d.Allowed {
-			d.Confirmable = true
-			return d
-		}
-	}
-
 	return matchRules(n, []rule{stateDirRule()})
 }
 
@@ -269,10 +237,8 @@ func CheckWrite(p string) Decision { return Check(p, false) }
 
 // CheckRead 判定一次**只读**访问。
 //
-// 读取刻意比写入宽松得多，理由有二：
-//   - /sdcard/Android/{data,obb} 的语义就是"只能读不能动"，读是承诺的能力；
-//   - stateDir 里的 config.json 一直可被 novaai_fs_read 读，且
-//     novaai_config export 就是要把配置读出来。
+// 读取刻意比写入宽松得多：/sdcard/Android/{data,obb} 的语义就是
+// "只能读不能动"，读是承诺的能力。
 //
 // 因此这里**不**复用 fixedDeny，只用 readDeny（块设备与内核参数）。
 // 也不应用 criticalRoots —— 那限制的是递归删除，与读无关。
@@ -284,10 +250,9 @@ func CheckRead(p string) Decision {
 	return matchRules(n, readDeny)
 }
 
-// CheckSystemPath 只判定 fixedDeny 与 criticalRoots，不含 stateDir 与
-// androidDataRoots。
+// CheckSystemPath 只判定 fixedDeny 与 criticalRoots，不含 stateDir。
 //
-// 用于归档恢复：备份本来就是模块自己的数据，恢复回 stateDir 是合法操作，
+// 用于归档成员检查：备份本来就是模块自己的数据，恢复回 stateDir 是合法操作，
 // 但归档里混入 /system 或 /data/adb/modules 的条目必须拒绝。
 func CheckSystemPath(p string, recursive bool) Decision {
 	n := Normalize(p)
@@ -360,7 +325,7 @@ func Normalize(p string) string {
 	}
 	p = path.Clean(p)
 	if !strings.HasPrefix(p, "/") {
-		// 相对路径在调用方（resolvePath / joinCwd）已转绝对
+		// 相对路径在调用方（resolvePath）已转绝对
 		return p
 	}
 	return resolveSymlinks(p, 0)
@@ -470,15 +435,6 @@ func ProtectedPaths() []string {
 		out = append(out, r.prefix)
 	}
 	out = append(out, StateDir())
-	return out
-}
-
-// ReadOnlyPaths 返回"可读、变更需确认"的前缀。
-func ReadOnlyPaths() []string {
-	out := make([]string, 0, len(androidDataRoots))
-	for _, r := range androidDataRoots {
-		out = append(out, r.prefix)
-	}
 	return out
 }
 

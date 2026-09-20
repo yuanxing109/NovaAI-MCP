@@ -16,7 +16,6 @@ type Entry struct {
 	Seq         int64    `json:"seq"`
 	Session     string   `json:"session,omitempty"`
 	Peer        PeerInfo `json:"peer,omitempty"`
-	UID         int      `json:"uid,omitempty"`
 	Profile     string   `json:"profile,omitempty"`
 	Event       string   `json:"event"`
 	Tool        string   `json:"tool,omitempty"`
@@ -34,6 +33,10 @@ type PeerInfo struct {
 	Port int    `json:"port,omitempty"`
 }
 
+// Logger 是 JSONL 审计写入器。
+//
+// 轮转规则只有两条：按日切文件（0600，目录 0700），单文件超过
+// maxFileBytes 再切一次。保留 retentionDays 天。
 type Logger struct {
 	mu      sync.Mutex
 	cfg     *config.AuditConfig
@@ -41,6 +44,7 @@ type Logger struct {
 	curFile *os.File
 	curSize int64
 	curDate string
+	rotated int
 	seq     int64
 	closed  bool
 	stopCh  chan struct{}
@@ -48,12 +52,13 @@ type Logger struct {
 }
 
 func NewLogger(cfg *config.Config) (*Logger, error) {
-	if err := os.MkdirAll(cfg.Paths.AuditDir, 0700); err != nil {
+	dir := cfg.AuditDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
 	l := &Logger{
 		cfg:    &cfg.Audit,
-		dir:    cfg.Paths.AuditDir,
+		dir:    dir,
 		stopCh: make(chan struct{}),
 	}
 	l.rotateIfNeeded()
@@ -91,7 +96,7 @@ func (l *Logger) Log(e Entry) {
 	if n, err := l.curFile.Write(line); err == nil {
 		l.curSize += int64(n)
 	}
-	if l.curSize > l.cfg.MaxFileBytes {
+	if l.cfg.MaxFileBytes > 0 && l.curSize > l.cfg.MaxFileBytes {
 		l.rotate()
 	}
 }
@@ -101,8 +106,9 @@ func (l *Logger) rotateIfNeeded() error {
 	if l.curDate == today && l.curFile != nil {
 		return nil
 	}
-	l.rotate()
 	l.curDate = today
+	l.rotated = 0
+	l.rotate()
 	return nil
 }
 
@@ -110,9 +116,15 @@ func (l *Logger) rotate() {
 	if l.curFile != nil {
 		_ = l.curFile.Close()
 	}
-	name := fmt.Sprintf("audit-%s-%d.jsonl", l.curDate, time.Now().UnixNano())
-	path := filepath.Join(l.dir, name)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	// 按日命名；同一天内的第二次及以后的轮转加序号后缀，
+	// 否则会覆盖掉当天的前一个文件。
+	name := fmt.Sprintf("audit-%s.jsonl", l.curDate)
+	if l.rotated > 0 {
+		name = fmt.Sprintf("audit-%s.%d.jsonl", l.curDate, l.rotated)
+	}
+	l.rotated++
+
+	f, err := os.OpenFile(filepath.Join(l.dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return
 	}
@@ -123,27 +135,23 @@ func (l *Logger) rotate() {
 	l.pruneOld()
 }
 
+// pruneOld 只按保留天数清理，不设文件数上限。
 func (l *Logger) pruneOld() {
+	if l.cfg.RetentionDays <= 0 {
+		return
+	}
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return
 	}
 	cutoff := time.Now().AddDate(0, 0, -l.cfg.RetentionDays)
-	var files []os.FileInfo
 	for _, e := range entries {
 		info, err := e.Info()
-		if err == nil {
-			files = append(files, info)
+		if err != nil {
+			continue
 		}
-	}
-	if len(files) > l.cfg.MaxFiles {
-		for _, f := range files[:len(files)-l.cfg.MaxFiles] {
-			_ = os.Remove(filepath.Join(l.dir, f.Name()))
-		}
-	}
-	for _, f := range files {
-		if f.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(l.dir, f.Name()))
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(l.dir, info.Name()))
 		}
 	}
 }

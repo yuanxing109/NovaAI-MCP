@@ -95,13 +95,7 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 				return errFail("EXEC_FAILED", err.Error()), nil
 			}
 
-			return map[string]any{
-				"success":  code == 0,
-				"code":     "OK",
-				"stdout":   out,
-				"stderr":   errOut,
-				"exitCode": code,
-			}, nil
+			return execResult(out, errOut, code), nil
 		})
 
 	// ---- script ----
@@ -179,12 +173,6 @@ func registerExecTools(reg RegisterFn, deps *Deps) {
 				return errFail("EXEC_FAILED", err.Error()), nil
 			}
 
-			return map[string]any{
-				"success":  code == 0,
-				"code":     "OK",
-				"stdout":   out,
-				"stderr":   errOut,
-				"exitCode": code,
-			}, nil
+			return execResult(out, errOut, code), nil
 		})
 }

@@ -165,13 +165,12 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 	// ---- fs_write ----
 	reg("novaai_fs_write", "写入文件", "创建、追加、截断、补丁写入或更新时间戳",
 		objSchema(map[string]any{
-			"action":           enumProp("明确操作", "create", "append", "truncate", "patch", "touch"),
-			"path":             strProp("文件路径"),
-			"content":          strProp("内容"),
-			"encoding":         enumProp("编码", "utf-8", "text", "base64"),
-			"offset":           intProp("写入偏移"),
-			"createParents":    boolProp("自动创建父目录"),
-			"confirmDangerous": boolProp("确认对 /sdcard/Android/{data,obb} 的变更"),
+			"action":        enumProp("明确操作", "create", "append", "truncate", "patch", "touch"),
+			"path":          strProp("文件路径"),
+			"content":       strProp("内容"),
+			"encoding":      enumProp("编码", "utf-8", "text", "base64"),
+			"offset":        intProp("写入偏移"),
+			"createParents": boolProp("自动创建父目录"),
 		}, "action", "path"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -181,20 +180,14 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				Encoding      string `json:"encoding"`
 				Offset        int    `json:"offset"`
 				CreateParents bool   `json:"createParents"`
-				Confirm       bool   `json:"confirmDangerous"`
 			}
 			_ = json.Unmarshal(args, &in)
 			p := resolvePath(deps, in.Path)
 
-			// /sdcard/Android/{data,obb} 默认拒绝写入；只有显式
-			// confirmDangerous 才放行（硬拒绝位置不受它影响）。
-			if err, confirmable := guardPathStrict(p, false); err != nil {
-				if confirmable && in.Confirm {
-					err = guardPathConfirmed(p, false)
-				}
-				if err != nil {
-					return errFail("PROTECTED_PATH", err.Error()), nil
-				}
+			// /sdcard/Android/{data,obb} 与 /system 一样是硬拒绝：
+			// confirmDangerous 机制已移除，工具层没有放行通道，如需访问走 shell。
+			if err := guardPath(p, false); err != nil {
+				return errFail("PROTECTED_PATH", err.Error()), nil
 			}
 
 			if in.CreateParents {
@@ -261,19 +254,18 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 	// ---- fs_manage ----
 	reg("novaai_fs_manage", "文件管理", "目录、复制、移动、删除、权限、所有者与链接管理",
 		objSchema(map[string]any{
-			"action":           enumProp("操作", "mkdir", "copy", "move", "remove", "chmod", "chown", "symlink", "hardlink", "selinux"),
-			"path":             strProp("路径"),
-			"source":           strProp("源"),
-			"destination":      strProp("目标"),
-			"recursive":        boolProp("递归"),
-			"parents":          boolProp("创建父目录"),
-			"overwrite":        boolProp("覆盖"),
-			"mode":             strProp("权限，如 0644"),
-			"uid":              intProp("UID"),
-			"gid":              intProp("GID"),
-			"target":           strProp("链接目标"),
-			"context":          strProp("SELinux context"),
-			"confirmDangerous": boolProp("确认破坏性操作"),
+			"action":      enumProp("操作", "mkdir", "copy", "move", "remove", "chmod", "chown", "symlink", "hardlink", "selinux"),
+			"path":        strProp("路径"),
+			"source":      strProp("源"),
+			"destination": strProp("目标"),
+			"recursive":   boolProp("递归"),
+			"parents":     boolProp("创建父目录"),
+			"overwrite":   boolProp("覆盖"),
+			"mode":        strProp("权限，如 0644"),
+			"uid":         intProp("UID"),
+			"gid":         intProp("GID"),
+			"target":      strProp("链接目标"),
+			"context":     strProp("SELinux context"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
@@ -289,7 +281,6 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				GID         int    `json:"gid"`
 				Target      string `json:"target"`
 				Context     string `json:"context"`
-				Confirm     bool   `json:"confirmDangerous"`
 			}
 			_ = json.Unmarshal(args, &in)
 
@@ -333,12 +324,7 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 				}
 				return ok(map[string]any{"src": src, "dst": dst}), nil
 			case "remove":
-				if !in.Confirm {
-					return errFail("NOT_CONFIRMED", "remove 需要 confirmDangerous: true"), nil
-				}
-				// 到这一步 confirmDangerous 已经为 true，因此可确认档放行；
-				// 硬拒绝（/system、/data/adb/modules…）仍然拒绝。
-				if err := guardPathConfirmed(p, in.Recursive); err != nil {
+				if err := guardPath(p, in.Recursive); err != nil {
 					return errFail("PROTECTED_PATH", err.Error()), nil
 				}
 				var err error
@@ -443,7 +429,7 @@ func registerFSTools(reg RegisterFn, deps *Deps) {
 			}
 			root := resolvePath(deps, in.Root)
 			if root == "" {
-				root = deps.Config.Paths.WorkspaceRoot
+				root = deps.Config.WorkspaceRoot()
 			}
 
 			switch in.Action {

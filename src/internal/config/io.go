@@ -3,15 +3,17 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 )
 
 // Load 读取并校验配置。
 //
 // 配置不支持热重载：进程启动时加载一次，改动需要重启 daemon。
-// 这里刻意不保留"当前配置"的全局副本 —— 曾经有一份 current/Set/Current
-// 三元组，但没有任何调用方，只会让人误以为改配置能即时生效。
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -19,15 +21,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	// 以默认值打底再反序列化：JSON 里缺失的字段天然保留默认值。
-	//
-	// 这里刻意不再用 reflect 事后"补零值"。旧实现有三个必然错误：
-	//   1. map 分支对不存在的键调用 MapIndex(key).IsZero()，
-	//      而 MapIndex 未命中时返回的是无效 Value，直接 panic；
-	//   2. slice 分支把用户显式写的 [] 也当成"未设置"并还原成默认值，
-	//      导致 denyTools: [] 会复活默认黑名单；
-	//   3. bool 分支完全不合并，于是 validateHost 这类默认为 true 的
-	//      开关在用户没写时静默变成 false。
-	// 以默认值为基底可以一次性消除这三类问题。
 	cfg := *Default()
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -57,84 +50,137 @@ func WriteAtomic(path string, cfg *Config) error {
 
 // Validate 是配置进入进程的唯一闸门。
 //
-// 这里刻意承载两类检查：
-//   - 值域检查（端口、卷数）；
-//   - **组合检查**：单个开关都合法、合在一起才危险的配置。
-//
-// 第二类才是重点。security 的三个开关各自看都没问题，但
-// anonymous + validateOrigin=false 意味着一份不需要 token 的 root 工具面，
-// 且任何网页都能盲打它（服务端不检查 Content-Type，所以 text/plain 的
-// "简单请求"不触发 preflight，请求会被真正执行，攻击者只是读不到响应）。
-// allowCors + validateOrigin=false 更糟：CORS 反射任意 Origin，preflight
-// 通过后网页就能带上 token 全权访问。这类配置不该等到运行时才发现，
-// 它必须在启动时就是非法的。
+// 只做值域检查：组合校验（anonymous/token/lan/CORS）随字段一起删除了，
+// 因为那些开关已经不存在。
 func Validate(cfg *Config) error {
-	if cfg.SchemaVersion != 3 {
-		return fmt.Errorf("unsupported schemaVersion: %d", cfg.SchemaVersion)
+	if cfg.StateDir == "" {
+		return fmt.Errorf("stateDir 不能为空")
 	}
-	if cfg.Network.Port < 1 || cfg.Network.Port > 65535 {
-		return fmt.Errorf("invalid port: %d", cfg.Network.Port)
+	if err := validateListen(cfg.Listen); err != nil {
+		return err
 	}
-	if cfg.Security.LAN.Enabled && !cfg.Security.Token.Enabled {
-		return fmt.Errorf("LAN 开启时必须启用 token")
+	if cfg.Profile != DefaultProfileName {
+		return fmt.Errorf("profile 只能是 %q，实际 %q", DefaultProfileName, cfg.Profile)
 	}
-	if cfg.Session.MaxSessions <= 0 {
-		return fmt.Errorf("maxSessions 必须 > 0")
+	if cfg.ShellTimeoutSeconds <= 0 {
+		return fmt.Errorf("shellTimeoutSeconds 必须 > 0")
 	}
+	if cfg.ResultPreviewBytes < 0 {
+		return fmt.Errorf("resultPreviewBytes 不能为负")
+	}
+	if err := validateUpstreams(cfg.Upstreams); err != nil {
+		return err
+	}
+	return nil
+}
 
-	// ---- 危险组合 ----
-	if cfg.Security.Anonymous && !cfg.Security.ValidateHost {
-		return fmt.Errorf("anonymous 与 validateHost=false 不能同时开启：" +
-			"DNS rebinding 后浏览器与该端口同源，将失去唯一的来源校验")
-	}
-	if cfg.Security.Anonymous && !cfg.Security.ValidateOrigin {
-		return fmt.Errorf("anonymous 与 validateOrigin=false 不能同时开启：" +
-			"任意网页可跨源盲打 root 工具")
-	}
-	if cfg.Security.AllowCORS && !cfg.Security.ValidateOrigin {
-		return fmt.Errorf("allowCors 与 validateOrigin=false 不能同时开启：" +
-			"CORS 会反射任意 Origin，网页可带 token 全权访问")
-	}
+// upstreamNameRe 是上游名的白名单：字母数字与 `-` `_` `.`。
+//
+// 收紧到白名单而不是黑名单，是因为这个名字会进入工具名
+// （`{name}__{tool}`），而工具名要能被客户端安全地当标识符使用。
+var upstreamNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
-	// ---- profile 引用完整性 ----
-	//
-	// 悬空的 profile 名必须在这里拒绝。运行时 profile.Store.Get 会回退到
-	// default（见 internal/profile），但那是兜底不是许可：绑定写错名字是
-	// 配置错误，应当让进程起不来，而不是静默换一个权限档位。
-	if len(cfg.Profiles) == 0 {
-		return fmt.Errorf("profiles 不能为空：至少要有一个 default")
-	}
-	if _, ok := cfg.Profiles["default"]; !ok {
-		return fmt.Errorf("profiles 缺少 default：它是不存在的 profile 名的回退目标")
-	}
-	if fb := cfg.SessionBinding.Fallback; fb != "" {
-		if _, ok := cfg.Profiles[fb]; !ok {
-			return fmt.Errorf("sessionBinding.fallback 指向不存在的 profile: %q", fb)
+// toolNameRe 是上游 denyTools 条目的白名单。
+//
+// 比 upstreamNameRe 多一个大写与下划线组合的空间：上游工具名可能形如
+// `read_file` 或 `ReadFile`。
+var toolNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validateUpstreams 校验上游配置。
+//
+// 这一层必须在启动时把关：上游名是工具名的前缀，一个写错的名字会让
+// 一整批工具在 tools/list 里出现却永远路由不到；而 name 里含 `__` 会直接
+// 破坏"按第一个 `__` 切分"的路由规则（`docs/upstream.md` 的路由契约）。
+func validateUpstreams(list []UpstreamConfig) error {
+	seen := map[string]bool{}
+	for i, u := range list {
+		where := fmt.Sprintf("upstreams[%d]", i)
+		if u.Name == "" {
+			return fmt.Errorf("%s.name 不能为空", where)
 		}
-	}
-	for hash, name := range cfg.SessionBinding.ByTokenHash {
-		if _, ok := cfg.Profiles[name]; !ok {
-			return fmt.Errorf("sessionBinding.byTokenHash[%s] 指向不存在的 profile: %q",
-				shortHash(hash), name)
+		where = fmt.Sprintf("upstreams[%d] (%s)", i, u.Name)
+		if !upstreamNameRe.MatchString(u.Name) {
+			return fmt.Errorf("%s.name 只能含字母、数字、'_'、'-'、'.'", where)
 		}
-	}
+		// 双下划线是命名空间分隔符。允许它出现在前缀里会让
+		// `a__b__tool` 无法判断是哪个上游的工具。
+		if strings.Contains(u.Name, "__") {
+			return fmt.Errorf("%s.name 不能包含 %q（它是工具名的命名空间分隔符）",
+				where, "__")
+		}
+		if seen[u.Name] {
+			return fmt.Errorf("%s.name 重复", where)
+		}
+		seen[u.Name] = true
 
-	// ---- 默认 profile 的形状 ----
-	//
-	// AllowTools 为空等于"什么都不允许"，但那是 profile 作者写漏了，
-	// 不是一个可用的档位；让它启动失败比让它静默拒绝一切要好定位。
-	for name, p := range cfg.Profiles {
-		if len(p.AllowTools) == 0 {
-			return fmt.Errorf("profile %q 的 allowTools 为空：无工具可用，请显式写出允许列表", name)
+		switch u.Type {
+		case UpstreamTypeHTTP:
+			if u.URL == "" {
+				return fmt.Errorf("%s 类型为 http 时 url 必填", where)
+			}
+			if !strings.HasPrefix(u.URL, "http://") && !strings.HasPrefix(u.URL, "https://") {
+				return fmt.Errorf("%s.url 必须以 http:// 或 https:// 开头", where)
+			}
+		case UpstreamTypeStdio:
+			if u.Command == "" {
+				return fmt.Errorf("%s 类型为 stdio 时 command 必填", where)
+			}
+		default:
+			return fmt.Errorf("%s.type 只能是 %q 或 %q，实际 %q",
+				where, UpstreamTypeHTTP, UpstreamTypeStdio, u.Type)
+		}
+
+		if u.RiskCeiling < 0 || u.RiskCeiling > DefaultUpstreamRiskCeiling {
+			return fmt.Errorf("%s.riskCeiling 必须在 0..%d 之间（0 表示继承默认）",
+				where, DefaultUpstreamRiskCeiling)
+		}
+		for _, d := range u.DenyTools {
+			if !toolNameRe.MatchString(d) {
+				return fmt.Errorf("%s.denyTools 含非法工具名 %q", where, d)
+			}
+		}
+		if err := validateLaunch(where, u); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// shortHash 把 token 哈希截短用于错误信息，避免把完整哈希写进日志。
-func shortHash(h string) string {
-	if len(h) <= 12 {
-		return h
+// validateLaunch 校验启动方式。缺省（nil）合法，等同 manual。
+func validateLaunch(where string, u UpstreamConfig) error {
+	switch u.LaunchType() {
+	case LaunchManual:
+		return nil
+	case LaunchIntent:
+		if u.Launch.Package == "" {
+			return fmt.Errorf("%s.launch 类型为 intent 时 package 必填", where)
+		}
+		if u.Launch.Action == "" && u.Launch.Activity == "" {
+			return fmt.Errorf("%s.launch 类型为 intent 时 action 与 activity 至少填一个", where)
+		}
+	case LaunchCommand:
+		if u.Launch.Command == "" {
+			return fmt.Errorf("%s.launch 类型为 command 时 command 必填", where)
+		}
+	default:
+		return fmt.Errorf("%s.launch.type 只能是 %q / %q / %q，实际 %q",
+			where, LaunchIntent, LaunchCommand, LaunchManual, u.Launch.Type)
 	}
-	return h[:12] + "…"
+	return nil
+}
+
+// validateListen 校验 "host:port" 形式的监听地址。
+func validateListen(addr string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("listen 不是合法的 host:port: %q", addr)
+	}
+	if host != "" && net.ParseIP(host) == nil && !strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("listen 的主机部分必须是 IP 字面量或 localhost: %q", addr)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("listen 端口非法: %q", addr)
+	}
+	return nil
 }

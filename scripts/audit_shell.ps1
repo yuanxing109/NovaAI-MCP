@@ -54,9 +54,14 @@ function Test-IsCommentLine([string]$Line) {
 }
 
 # 在代码行里搜一个模式，返回 "文件:行号:内容"。
-function Find-CodeHits([string]$Pattern, [switch]$CaseSensitive) {
+#
+# -OnlyExtension 用来把扫描限定在一种文件类型。需要它是因为"在 Go 里不许出现 X"
+# 与"在任何文件里都不许出现 X"是两个不同的断言 —— 用同一个函数不带限定去写前者，
+# 会把 build.sh / customize.sh 里合法的同名引用一起报出来（第 5 项初版就是这么错的）。
+function Find-CodeHits([string]$Pattern, [switch]$CaseSensitive, [string]$OnlyExtension) {
     $out = @()
     foreach ($f in $codeFiles) {
+        if ($OnlyExtension -and $f.Extension -ne $OnlyExtension) { continue }
         $i = 0
         foreach ($line in (Get-Content -LiteralPath $f.FullName)) {
             $i++
@@ -224,13 +229,41 @@ if (-not (Test-Path -LiteralPath $wfPath)) {
 Write-Check '4. 版本号唯一来源为 module.prop（G11）' $problems
 
 # --------------------------------------------------- 5. jar 单一副本（G4）
+#
+# 不变量在精简重构后变了，这项也重写了 —— 旧版断言 `reverse.go` 里出现
+# `apktoolJarPath()`，而那个文件随逆向工具一起删了。旧版于是变成"读一个不存在的
+# 文件"，Get-Content 直接抛错，整个审计在第 4 项之后崩掉（其余项根本没跑）。
+# 这正是"检查器依赖被检查对象的某个具体文件"的代价：被检查对象一改，检查器不是
+# 失败而是**消失**。
+#
+# 现状（以代码为准）：
+#   Go 侧不再解析任何 jar 路径（`grep -rn '\.jar' src --include=*.go` 为空）；
+#   jar 的唯一消费者是 bin/wrappers/{apktool,baksmali,smali}，它们直接 exec
+#   模块内 /data/adb/modules/novaai.mcp/bin/tools/<name>.jar。
+# 所以断言收敛成三条，都不依赖某个具体文件是否存在。
 $problems = @()
 foreach ($h in (Find-CodeHits -Pattern 'novaai-mcp/tools' -CaseSensitive)) {
     $problems += ("仍从状态目录读工具 jar: {0}" -f $h)
 }
-$revSrc = Get-Content -LiteralPath (Join-Path $Root 'src\internal\tools\v02\reverse.go') -Raw
-if ($revSrc -notmatch 'apktoolJarPath\(\)') {
-    $problems += 'reverse.go 不再使用 apktoolJarPath() —— jar 路径来源不明'
+# Go 侧不得再出现 jar 路径：那是 wrappers 的职责。若将来又加回来，jar 的
+# "唯一一份"就有了第二个消费者，需要重新审。
+# 限定 .go：build.sh 与 customize.sh 里**必须**出现 jar 路径（一个负责打包、
+# 一个负责修权限位），那是正当引用。
+foreach ($h in (Find-CodeHits -Pattern '\.jar' -CaseSensitive -OnlyExtension '.go')) {
+    $problems += ("Go 代码里出现 jar 路径: {0} —— jar 只由 bin/wrappers 消费" -f $h)
+}
+# 需要 jar 的 wrapper 必须指向模块内路径。
+$toolDir = '/data/adb/modules/novaai.mcp/bin/tools'
+foreach ($w in @('apktool', 'baksmali', 'smali')) {
+    $wp = Join-Path $Root "bin\wrappers\$w"
+    if (-not (Test-Path -LiteralPath $wp)) {
+        $problems += ("缺少 wrapper: bin/wrappers/{0}" -f $w)
+        continue
+    }
+    $wb = Get-Content -LiteralPath $wp -Raw
+    if ($wb -notmatch [regex]::Escape("$toolDir/$w.jar")) {
+        $problems += ("bin/wrappers/{0} 不再指向模块内 {1}/{0}.jar" -f $w, $toolDir)
+    }
 }
 if ((Get-Content -LiteralPath (Join-Path $Root 'customize.sh') -Raw) -match 'cp\s+"\$MODDIR/bin/tools/"') {
     $problems += 'customize.sh 又把 jar 复制到状态目录了'

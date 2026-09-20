@@ -1,16 +1,11 @@
-// Package ratelimit 提供三层令牌桶限流：全局、按客户端身份、按工具，
-// 外加一个按客户端身份的并发调用信号量。
+// Package ratelimit 提供两层令牌桶限流（全局、shell）外加一个并发信号量。
 //
 // 设计约定：
 //   - qps <= 0 视为"未配置"，该层不限流，直接放行；
-//   - 桶是惰性创建的，只在第一次用到该 key 时分配；
-//   - 并发槽由调用方负责 Release，通常 defer 在 tools/call 处理末尾。
+//   - 桶在构造时一次性建好，没有惰性创建，也没有需要清扫的 key 表。
 //
-// 关于 key：第二层和并发槽的 key 必须是**客户端不可伪造**的身份标识，
-// 当前取 token 的 SHA-256。绝不能用 Mcp-Session-Id —— 那是客户端自报的
-// 请求头，只要每次换一个（或不带）就能拿到一个全新的满额桶，限流形同虚设。
-// 因为 key 的取值范围由 token 数量决定（很小且固定），桶表天然有界，
-// 不需要额外的清扫逻辑。
+// 重构后没有"按身份"的层：所有来源本来就是同一个身份（无 token、
+// 不分来源），再多一个维度只是多一处可被误读的状态。
 package ratelimit
 
 import (
@@ -26,7 +21,6 @@ type Scope string
 
 const (
 	ScopeGlobal     Scope = "global"
-	ScopeClient     Scope = "client"
 	ScopeTool       Scope = "tool"
 	ScopeConcurrent Scope = "concurrency"
 )
@@ -42,8 +36,6 @@ func (e *LimitError) Error() string {
 	switch e.Scope {
 	case ScopeGlobal:
 		return fmt.Sprintf("触发全局限流（%.1f QPS），请降低调用频率", e.Limit)
-	case ScopeClient:
-		return fmt.Sprintf("触发客户端身份限流（%.1f QPS），请降低调用频率", e.Limit)
 	case ScopeTool:
 		return fmt.Sprintf("工具 %s 触发限流（%.1f QPS）", e.Tool, e.Limit)
 	case ScopeConcurrent:
@@ -101,99 +93,71 @@ func (b *bucket) allow() bool {
 
 // Limiter 是限流器本体，零值不可用，必须经 NewLimiter 构造。
 type Limiter struct {
-	cfg *config.RateLimitConfig
+	global    *bucket
+	shell     *bucket
+	globalQPS float64
+	shellQPS  float64
 
-	global *bucket
-
-	mu      sync.Mutex
-	perKey  map[string]*bucket
-	perTool map[string]*bucket
-	keySem  map[string]chan struct{}
+	sem chan struct{}
 }
 
 func NewLimiter(cfg *config.Config) *Limiter {
 	l := &Limiter{
-		cfg:     &cfg.RateLimit,
-		perKey:  make(map[string]*bucket),
-		perTool: make(map[string]*bucket),
-		keySem:  make(map[string]chan struct{}),
+		global:    newBucket(cfg.Limits.GlobalQPS, cfg.Limits.GlobalQPS*2),
+		shell:     newBucket(cfg.Limits.ShellQPS, cfg.Limits.ShellQPS*2),
+		globalQPS: cfg.Limits.GlobalQPS,
+		shellQPS:  cfg.Limits.ShellQPS,
 	}
-	l.global = newBucket(cfg.RateLimit.Global.QPS, cfg.RateLimit.Global.Burst)
-	for name, b := range cfg.RateLimit.PerTool {
-		l.perTool[name] = newBucket(b.QPS, b.Burst)
+	if n := cfg.Limits.MaxConcurrent; n > 0 {
+		l.sem = make(chan struct{}, n)
 	}
 	return l
 }
 
-func (l *Limiter) keyBucket(key string) *bucket {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	b, ok := l.perKey[key]
-	if !ok {
-		b = newBucket(l.cfg.PerSession.QPS, l.cfg.PerSession.Burst)
-		l.perKey[key] = b
-	}
-	return b
+// shellTools 是需要单独计数的高消耗工具。
+var shellTools = map[string]bool{
+	"novaai_shell":  true,
+	"novaai_script": true,
 }
 
-// Allow 依次检查全局 / 客户端身份 / 工具三层限流。
+// Allow 依次检查全局 / shell 两层限流。
 // 任一层拒绝即返回 *LimitError，并且不再消耗后面层的令牌。
-//
-// key 必须是客户端不可伪造的身份标识（见包注释）。
-func (l *Limiter) Allow(key, tool string) error {
+func (l *Limiter) Allow(tool string) error {
 	if !l.global.allow() {
-		return &LimitError{Scope: ScopeGlobal, Tool: tool, Limit: l.cfg.Global.QPS}
+		return &LimitError{Scope: ScopeGlobal, Tool: tool, Limit: l.globalQPS}
 	}
-	if !l.keyBucket(key).allow() {
-		return &LimitError{Scope: ScopeClient, Tool: tool, Limit: l.cfg.PerSession.QPS}
-	}
-	l.mu.Lock()
-	tb, ok := l.perTool[tool]
-	l.mu.Unlock()
-	if ok && !tb.allow() {
-		return &LimitError{Scope: ScopeTool, Tool: tool, Limit: l.cfg.PerTool[tool].QPS}
+	if shellTools[tool] && !l.shell.allow() {
+		return &LimitError{Scope: ScopeTool, Tool: tool, Limit: l.shellQPS}
 	}
 	return nil
 }
 
-// AcquireSlot 尝试占用一个客户端并发槽。返回 false 表示已达上限。
+// AcquireSlot 尝试占用一个并发槽。返回 false 表示已达上限。
 // 成功时必须配对调用 ReleaseSlot。
-func (l *Limiter) AcquireSlot(key string) bool {
-	max := l.cfg.PerSession.MaxConcurrentTools
-	if max <= 0 {
+func (l *Limiter) AcquireSlot() bool {
+	if l.sem == nil {
 		return true
 	}
-	l.mu.Lock()
-	sem, ok := l.keySem[key]
-	if !ok {
-		sem = make(chan struct{}, max)
-		l.keySem[key] = sem
-	}
-	l.mu.Unlock()
-
 	select {
-	case sem <- struct{}{}:
+	case l.sem <- struct{}{}:
 		return true
 	default:
 		return false
 	}
 }
 
-// ReleaseSlot 释放一个客户端并发槽。
-func (l *Limiter) ReleaseSlot(key string) {
-	l.mu.Lock()
-	sem, ok := l.keySem[key]
-	l.mu.Unlock()
-	if !ok {
+// ReleaseSlot 释放一个并发槽。
+func (l *Limiter) ReleaseSlot() {
+	if l.sem == nil {
 		return
 	}
 	select {
-	case <-sem:
+	case <-l.sem:
 	default:
 	}
 }
 
 // ConcurrencyLimit 返回配置的并发上限，用于错误提示。
 func (l *Limiter) ConcurrencyLimit() float64 {
-	return float64(l.cfg.PerSession.MaxConcurrentTools)
+	return float64(cap(l.sem))
 }

@@ -70,6 +70,9 @@ var baseRiskLevels = map[string]int{
 	"novaai_root_module": 3,
 	"novaai_systemless":  3,
 	"novaai_config":      3,
+
+	// 上游聚合的观测工具：只读注册表，无副作用。
+	"novaai_upstream_status": 0,
 }
 
 var perActionRisk = map[string]map[string]int{
@@ -90,7 +93,12 @@ var perActionRisk = map[string]map[string]int{
 	},
 	"novaai_config": {
 		"get": 0, "validate": 0, "export": 0,
-		"update": 3,
+		// probe_upstreams 只是探测，不改状态；另外两个会重建注册表 /
+		// 重启上游子进程，属于能改变设备运行状态的操作。
+		"probe_upstreams":  0,
+		"reload_upstreams": 3,
+		"restart_upstream": 3,
+		"update":           3,
 	},
 	// 只列真实存在的 action。早期这里还写着 web_extract / browser_capture /
 	// feed_parse / cookie_* / ws_* —— 那些 action 从未实现过。

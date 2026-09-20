@@ -8,45 +8,52 @@ Android Root MCP 服务 - 让 AI 助手直接控制你的设备
 
 NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 服务，提供完整的 Root 权限控制能力。通过标准化的 MCP 协议，AI 助手可以直接与设备进行交互。
 
+它同时是一个 **MCP 聚合网关**：对外一个地址、一份合并后的工具列表；对内是自身的
+本地工具 + 你在 KernelSU WebUI 里添加的任意上游 MCP 服务。
+
+**本服务没有鉴权。** 权限边界就是**网络可达性**：谁能连上端口，谁就能调用工具。
+面向单用户自有设备、家庭可信 WiFi 的设计，装完即用。使用前请先读
+[⬇️ 安全模型](#️-安全模型必读)。
+
 ## 功能特性
 
+### 🔌 上游 MCP 聚合
+- 把其他 App / 本机进程暴露的 MCP 服务接进来，**工具自动合并**
+- HTTP 与 stdio 两种上游
+- 工具名前缀命名空间（`{上游}__{工具}`），与本地工具互不遮蔽
+- 四态状态模型（运行中 / 未启动 / 错误 / 已禁用）+ 懒启动
+- **KernelSU WebUI**：上游增删改、状态探测、工具目录浏览、手动测试调用
+- 详见 [docs/upstream.md](docs/upstream.md) 与 [docs/webui.md](docs/webui.md)
+
 ### 📱 设备控制
-- 应用管理（安装/卸载/启动/停止）
-- 系统设置（显示/音频/网络/语言）
-- 电源管理（重启/关机/Recovery）
-- 屏幕操作（截图/录屏/点击/滑动）
+- 应用管理（列表/信息/安装/启停/卸载）
+- 屏幕操作（截图/录屏/点击/滑动/文本输入）
+- 电源管理（重启/Recovery/Bootloader/关机）
 
 ### 📁 文件系统
-- 文件读写（文本/二进制/Base64）
-- 目录管理（创建/复制/移动/删除）
-- 文件搜索（按名称/内容/大小）
+- 文件读写（文本/二进制/Base64/补丁）
+- 目录管理（创建/复制/移动/删除/权限/链接）
+- 文件搜索（按名称/内容/大小/重复）
 - 哈希计算（MD5/SHA1/SHA256）
+- 归档与传输（ZIP/TAR/GZIP/XZ/7z、下载、分块上传、导出）
 
 ### 🔧 系统管理
-- 进程管理（列表/信号/优先级）
-- 系统属性（读取/设置）
-- 服务管理（Binder/Init 服务）
-- 网络操作（HTTP/Ping/DNS）
+- 进程管理（列表/信号/优先级/fd）
+- 日志读取（Logcat/内核/dmesg/模块与 MCP 日志）
+- Root 管理（框架探测、模块生命周期、Systemless 覆盖）
+- 命令执行（Shell / 多行脚本）
 
-### 🔍 逆向工程
-- APK 反编译（apktool/jadx）
-- DEX 分析（类/方法/字符串）
-- Smali 汇编/反汇编
-- 二进制分析（ELF/符号表）
-- Xposed 模块管理
-
-### 🛡️ 安全特性
-- Token 认证（loopback 也强制校验，可用 `security.anonymous` 显式关闭）
-- Host / Origin 校验（防 DNS rebinding 与浏览器盲 CSRF）
-- 权限控制（Profile 白/黑名单 + 风险等级上限，按 token 绑定 profile）
-- 审计日志
-- 频率限制（全局 / 客户端身份 / 单工具三层 + 并发上限）
+### 🛡️ 防护与可观测
+- Host / Origin 校验（防浏览器 DNS-rebinding）
+- 受保护路径判定（分区、模块目录、`/sdcard/Android/{data,obb}` 硬拒绝）
+- shell 命令拦截（防 `mkfs` / `dd of=/dev/block/*` / `rm -rf /system` 等手滑）
+- 审计日志（JSONL 按日、参数脱敏、7 天保留）
+- 频率限制（全局 / shell / 并发三层）
 
 ## 安装要求
 
 - Android 7.0+
 - Root 权限（Magisk/KernelSU/APatch）
-- [可选] Termux + Java（用于逆向工具）
 
 ## 安装方法
 
@@ -70,88 +77,128 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 ## MCP 地址
 
 ```
-TCP: http://127.0.0.1:5322/mcp
+TCP: http://0.0.0.0:5322/mcp     ← 局域网直连，无需 token
 Unix Socket: /data/adb/novaai-mcp/mcp.sock
 ```
 
+客户端连接 `http://<设备IP>:5322/mcp`（本机用 `127.0.0.1`），
+**不需要任何认证头**。
+
+> **改回本地模式**：把 `listen` 改成 `127.0.0.1:5322` 即可，**无需改代码**。
+> 见 [docs/config.md](docs/config.md) 的 `listen` 一节。
+
 ## 工具列表
 
-共 61 个工具，覆盖设备控制的各个方面。
+共 **30 个本地工具**（上游工具数量随配置变化，不计入）。
 
-| 类别 | 数量 | 说明 |
+| 类别 | 数量 | 工具 |
 |------|------|------|
-| 服务/状态 | 9 | 状态查询、能力探测、配置管理、自检，以及 auth/session/audit/health 状态 |
-| 设备调度 | 2 | 设备信息、脚本任务（本服务不自动触发） |
-| 文件系统 | 6 | 文件读写、搜索、哈希 |
-| 归档传输 | 4 | 压缩、下载、上传、导出 |
-| 命令执行 | 2 | Shell、脚本（默认 profile 拒绝，见下） |
-| 应用管理 | 9 | 安装、卸载、权限 |
-| Root/备份 | 4 | 模块管理、备份与恢复 |
-| 系统管理 | 4 | 进程、服务、属性、设置 |
-| 系统设置 | 10 | 显示、音频、网络 |
-| 网络日志 | 2 | HTTP、日志 |
-| 逆向工程 | 8 | APK/DEX/Smali 分析 |
-| 技能 | 1 | 内置技能文档的匹配与读取 |
+| 服务/状态 | 6 | `status` `capabilities` `health_status` `upstream_status` `config` `diagnostics` |
+| 文件系统 | 6 | `fs_info` `fs_read` `fs_write` `fs_manage` `fs_search` `fs_hash` |
+| 归档传输 | 4 | `archive` `download` `transfer_upload` `transfer_export` |
+| 命令执行 | 2 | `shell` `script` |
+| 应用管理 | 4 | `app_list` `app_info` `app_install` `app_manage` |
+| 系统 | 5 | `process` `log` `screen` `input` `power` |
+| Root | 3 | `root_info` `root_module` `systemless` |
 
-> 早期版本的 `novaai_task`（长任务查询）已删除：它的 5 个 action 全部空转，
-> 服务端也没有任何工具会产生 taskId。
->
+（工具名统一带 `novaai_` 前缀，例如 `novaai_status`。）
+
+> 早期版本有 61 个工具。精简到 29 个核心之后，上游聚合又加回了
+> 1 个观测工具（`novaai_upstream_status`）。被裁掉的能力
+> （逆向、Hook、技能、权限策略、通知、各类系统设置开关、网络、备份…）
+> **一律改由 `novaai_shell` 承担**。
+
+> 上游工具以 `{上游名}__{工具名}` 混在**同一个** `tools/list` 里返回。
+> 前缀对不上的名字仍然是 `-32015 工具不存在`。
+
 > `tools/list` 返回的 `inputSchema` 是**给客户端的契约**，服务端不做校验 ——
 > 未知 action 由每个 handler 的兜底分支返回 `UNKNOWN_ACTION`。详见
 > [docs/extensions.md](docs/extensions.md) 第 2.3 节。
 
-> 工具调用会按 `profiles` + `sessionBinding` 做白/黑名单与风险等级校验，
-> 详见 [docs/config.md](docs/config.md)。
->
+> **工具结果的 `code` 是英文的，且不会翻译。** 它给程序匹配用。同一个结果里
+> 另有一个 `codeName` 字段给人和 AI 看：
+> `{"code": "PROTECTED_PATH", "codeName": "路径受保护", "message": "路径受保护（/system）：…"}`。
+> 数字错误码（`-32015` 这类）不参与这套机制。完整对照表见
+> [docs/errors.md](docs/errors.md) 第 3 节。
+
+> 工具调用会过一次档位判定（工具存在性 → 档位 → 限流 → 执行）。
+> 当前只有 `default` 一个档位，**放行全部工具** —— 见下面的安全模型。
+
 > **通用文件与 shell 载体还会过一道受保护路径判定**（分区、`/data/adb/modules`、
-> 模块自身配置、`/sdcard/Android/{data,obb}` 只读等），详见 [docs/security.md](docs/security.md)。
+> 模块自身配置、`/sdcard/Android/{data,obb}` 硬拒绝），详见
+> [docs/security.md](docs/security.md)。
 
-## ⚠️ 升级须知（配置校验收紧）
+## ⚠️ 安全模型（必读）
 
-自本次提交起，配置加载时新增三条**危险组合**拒绝规则。下列配置在升级后会
-**拒绝启动**，需要先修正：
+### 权限边界 = 网络可达性
 
-| 组合 | 后果 | 修正 |
-|------|------|------|
-| `security.anonymous: true` + `validateHost: false` | 任何本机 App 均可免认证驱动 root 工具 | 打开 `validateHost` |
-| `security.anonymous: true` + `validateOrigin: false` | 任意网页可盲打 root 工具（`text/plain` 不触发 preflight） | 打开 `validateOrigin` |
-| `security.allowCors: true` + `validateOrigin: false` | CORS 反射任意 Origin，网页可带 token 全权访问 | 打开 `validateOrigin` |
+**本服务不鉴权。** 只要一个设备能连到 `0.0.0.0:5322`，它就能调用全部工具，
+包括 `novaai_shell` —— 那是一个以 root 身份运行的任意命令执行口子。
 
-同时，指向**不存在 profile** 的 `sessionBinding`（`fallback` 或
-`byTokenHash` 的值）现在会被拒绝。此前它会静默回退到一个"白名单通配 +
-`riskCeiling: 1`"的虚构 profile —— 一个 typo（`readonly` → `redonly`）会把
-只读身份提升为可写。
+| 你希望的效果 | 怎么配 |
+|---|---|
+| 局域网直连（默认） | `listen: "0.0.0.0:5322"` |
+| 只有本机 / 数据线可达 | `listen: "127.0.0.1:5322"` |
+| 只有 root 可达 | 用 Unix socket，不走 TCP |
 
-单独关闭 `validateOrigin`（不开 `anonymous`、不开 `allowCors`）**仍然允许**，
-例如原生客户端配自建前端的场景不受影响。
+**前提是家里 WiFi 可信、设备不暴露公网。** 具体残余风险见
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) 第 13 节，简版：
 
-背景与判定依据见 [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) 第 12 节。
+1. **不要做端口转发**，不要在咖啡厅 / 酒店 / 公司 WiFi 用。
+2. **同网段任何设备可 root shell** —— 家里的 IoT、访客设备、路由器本身。
+3. **`pathguard` 与 `antibrick` 只防手滑**，不是对抗攻击者。shell 可达时
+   它们全部可被绕过。
+4. **Host / Origin 校验不防内网直连**，只防浏览器 DNS-rebinding。
+5. **上游 MCP 的安全性由上游自己负责。** 本服务只做转发，不覆盖上游的鉴权；
+   而 `stdio` 上游是以 root 身份 spawn 的任意可执行文件 —— 与 `novaai_shell`
+   同级的能力。完整清单见 [docs/upstream.md](docs/upstream.md) 的安全边界一节。
 
-## 逆向工具
+### 配置
 
-内置以下逆向工具（需要 Termux + Java）：
+配置只有一件事要理解：`listen`。完整字段见 [docs/config.md](docs/config.md)，
+共 9 个键（含上游列表）。旧的 `security` / `network` / `profiles` /
+`sessionBinding` / `rateLimit` 等段已全部移除，残留在文件里会被静默忽略。
 
-| 工具 | 版本 | 功能 |
-|------|------|------|
-| apktool | 2.9.3 | APK 反编译 |
-| jadx | 1.5.5 | Java 反编译 |
-| smali | 3.0.10 | Smali 汇编 |
-| baksmali | 3.0.10 | Smali 反汇编 |
+## 上游 MCP 聚合
+
+把另一个 MCP 服务接进来，它的工具会**自动合并**到本服务的 `tools/list`：
+
+```json
+{
+  "upstreams": [
+    {
+      "name": "other_app_mcp",
+      "type": "http",
+      "url": "http://127.0.0.1:9999/mcp",
+      "enabled": true
+    }
+  ]
+}
+```
+
+重启后（或调 `novaai_config action=reload_upstreams`）AI 客户端就会看到
+`other_app_mcp__*` 系列工具。
+
+- **推荐用 WebUI 增删**：KernelSU 管理器里点本模块的「打开」。
+- 字段、状态模型、路由规则、launch 配置：**[docs/upstream.md](docs/upstream.md)**
+- WebUI 页面说明与已知限制：**[docs/webui.md](docs/webui.md)**
+
+> WebUI 只在 **KernelSU** 上可见；Magisk / APatch 用户请直接改 `config.json`。
 
 ## 使用示例
 
 ```bash
-# 获取设备信息
-novaai_device_info → action: get
+# 服务状态
+novaai_status → {}
 
 # 截屏
 novaai_screen → action: screenshot
 
-# 反编译 APK
-novaai_reverse_apk → action: decompile, package: com.app, tool: apktool
-
-# 执行 Shell 命令（默认 profile 会拒绝；把 token 绑到 agent_full 才可用）
+# 执行 Shell 命令（default 档位直接放行）
 novaai_shell → command: "id"
+
+# 读取应用列表
+novaai_app_list → action: list
 ```
 
 > `novaai_shell` 不带 `action`：它是单动作工具。带 `action` 的工具只有

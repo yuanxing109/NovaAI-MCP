@@ -6,91 +6,56 @@ import (
 	"github.com/novaai/novaai-mcp/internal/config"
 )
 
-// 本文件锁住 Store.Get 的回退语义。
+// 本文件锁住"档位固定为 default"这条不变式。
 //
-// 曾经的行为是 fail-open：名字不存在时返回一个凭空构造的
-// `{AllowTools: ["*"], RiskCeiling: 1}`。那比 default 宽松，也必然比
-// 用户想绑定的那个 profile 宽松——一个 typo（readonly -> redonly）
-// 就把只读身份提升成可写（fs_write / download / transfer_upload 都在
-// risk 1，而 readonly 的 ceiling 是 0）。
+// 重构前这里锁的是 Store.Get 的**回退语义**：名字不存在时必须落到
+// conservative 而不是 default，避免 typo 升格为完全权限。
+// 现在没有第二个档位，也就没有回退路径可走 —— Get 对任何名字都返回
+// default，配置里也写不出别的档位（config.Validate 会拒绝）。
 
-func testStore() *Store {
-	cfg := config.Default()
-	cfg.Profiles["tiny"] = config.Profile{
-		AllowTools:  []string{"novaai_status"},
-		DenyTools:   []string{},
-		RiskCeiling: 0,
-	}
-	return NewStore(cfg)
-}
-
-func TestGetReturnsKnownProfile(t *testing.T) {
-	s := testStore()
-	p := s.Get("tiny")
-	if p.RiskCeiling != 0 || len(p.AllowTools) != 1 {
-		t.Fatalf("已知 profile 应当原样返回，实际: %+v", p)
-	}
-}
-
-func TestGetUnknownFallsBackToDefaultNotWildcard(t *testing.T) {
-	s := testStore()
-	got := s.Get("redonly") // 打错的 readonly
-	want := s.Get("default")
-
-	if got.RiskCeiling != want.RiskCeiling {
-		t.Errorf("未知 profile 的 riskCeiling = %d，期望跟随 default = %d",
-			got.RiskCeiling, want.RiskCeiling)
-	}
-
-	// 关键回归：回退结果绝不允许比 default 更宽。
-	// 具体来说，旧实现给的 ceiling 1 会让 novaai_fs_write 通过，
-	// 而 default（denyTools 含 shell/config 等）不该允许它被"凭空允许"。
-	if got.RiskCeiling == 1 && len(got.DenyTools) == 0 {
-		t.Fatal("未知 profile 回退到了一个凭空构造的宽松档位（fail-open 回归）")
-	}
-
-	// default 的 denyTools 必须一起带过来，否则 shell 封锁会丢失。
-	if len(got.DenyTools) != len(want.DenyTools) {
-		t.Errorf("回退结果丢失了 default 的 denyTools: got %v want %v",
-			got.DenyTools, want.DenyTools)
-	}
-	for i := range want.DenyTools {
-		if i < len(got.DenyTools) && got.DenyTools[i] != want.DenyTools[i] {
-			t.Errorf("denyTools 不一致: got %v want %v", got.DenyTools, want.DenyTools)
-			break
+func TestGetAlwaysReturnsDefault(t *testing.T) {
+	s := NewStore()
+	for _, name := range []string{"", "default", "redonly", "no_such_profile"} {
+		p := s.Get(name)
+		if p.RiskCeiling != 3 || len(p.AllowTools) != 1 || p.AllowTools[0] != "*" {
+			t.Fatalf("Get(%q) = %+v，期望始终是 default 档位", name, p)
 		}
 	}
 }
 
-func TestGetUnknownProfileStillDeniesShell(t *testing.T) {
-	s := testStore()
-	p := s.Get("no_such_profile")
-	// 工具名与风险等级都按最容易通过的情形给：allowTools 为 ["*"]、
-	// risk 取 0。即便如此，denyTools 里的 novaai_shell 也必须被拒。
-	if Allows(&p, "novaai_shell", 0) {
-		t.Fatal("未知 profile 回退后仍然允许 novaai_shell —— 回退必须是保守的")
+// default 不 deny 任何工具。
+func TestDefaultProfileAllowsAll(t *testing.T) {
+	s := NewStore()
+	p := s.Get(config.DefaultProfileName)
+	if len(p.DenyTools) != 0 {
+		t.Fatalf("default.denyTools 应为空，实际: %v", p.DenyTools)
+	}
+	for _, tool := range []string{
+		"novaai_status", "novaai_fs_write", "novaai_shell", "novaai_script",
+		"novaai_root_module", "novaai_systemless", "novaai_config",
+	} {
+		if !Allows(&p, tool, 0) {
+			t.Errorf("default 不应拒绝 %s", tool)
+		}
 	}
 }
 
-func TestGetWithoutDefaultIsDenyAll(t *testing.T) {
-	store := &Store{
-		profiles: map[string]config.Profile{},
-		binding:  config.SessionBinding{},
-	}
-	p := store.Get("anything")
-	if p.RiskCeiling != 0 {
-		t.Errorf("无 default 时 riskCeiling = %d，期望 0", p.RiskCeiling)
-	}
-	if Allows(&p, "novaai_status", 0) {
-		t.Fatal("无 default 时不允许任何工具")
+// shell 必须放行：装完即用、含 shell 是明确诉求。
+func TestDefaultProfileAllowsShell(t *testing.T) {
+	s := NewStore()
+	p := s.Get(config.DefaultProfileName)
+	if !Allows(&p, "novaai_shell", 3) {
+		t.Fatal("default 必须放行 novaai_shell")
 	}
 }
 
-// ResolveByTokenHash 只负责解析名字，不校验名字是否存在
-// （那是 config.Validate 的职责）。这里锁住它的解析优先级。
-func TestResolveByTokenHashPriority(t *testing.T) {
-	s := testStore()
-	if got := s.ResolveByTokenHash("deadbeef"); got != "default" {
-		t.Errorf("无绑定无 fallback 时应为 default，实际 %q", got)
+// 风险上限仍然生效：risk 超过 ceiling 一律拒绝。
+func TestAllowsEnforcesRiskCeiling(t *testing.T) {
+	p := config.Profile{AllowTools: []string{"*"}, RiskCeiling: 1}
+	if Allows(&p, "novaai_shell", 2) {
+		t.Fatal("risk=2 超过 ceiling=1 时必须拒绝")
+	}
+	if !Allows(&p, "novaai_shell", 1) {
+		t.Fatal("risk=1 未超过 ceiling=1，必须放行")
 	}
 }

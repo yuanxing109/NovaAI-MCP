@@ -13,7 +13,7 @@ import (
 
 func registerStatusTools(reg RegisterFn, deps *Deps) {
 	// 无参数单动作工具：早期版本声明了 action("get")，handler 从不读它。
-	reg("novaai_status", "服务状态", "读取服务版本、地址、安全开关与运行时间",
+	reg("novaai_status", "服务状态", "读取服务版本、地址、档位与运行时间",
 		objSchema(map[string]any{}),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			up := readUptime()
@@ -26,16 +26,16 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 				"version":       v,
 				"goVersion":     runtime.Version(),
 				"stateDir":      deps.StateDir,
-				"workDir":       deps.Config.Paths.WorkDir,
 				"address": map[string]any{
-					"tcp":        fmt.Sprintf("127.0.0.1:%d", deps.Config.Network.Port),
+					"tcp":        deps.Config.Listen,
 					"mcp":        "/mcp",
-					"unixSocket": deps.Config.Security.UnixSocket.Path,
+					"unixSocket": deps.Config.UnixSocket,
 				},
+				// 无鉴权：权限边界 = 网络可达性。改 listen 为 127.0.0.1:5322
+				// 即可切本地模式。
 				"security": map[string]any{
-					"anonymous":    deps.Config.Security.Anonymous,
-					"tokenEnabled": deps.Config.Security.Token.Enabled,
-					"lanEnabled":   deps.Config.Security.LAN.Enabled,
+					"auth":    "none",
+					"profile": deps.Config.Profile,
 				},
 				"adapter": deps.Adapter.Name(),
 			}), nil
@@ -68,17 +68,19 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 			}), nil
 		})
 
-	reg("novaai_config", "服务配置", "读取、验证、原子更新或导出服务配置",
+	reg("novaai_config", "服务配置", "读取、验证、原子更新、导出服务配置，或管理上游 MCP 聚合",
 		objSchema(map[string]any{
-			"action":      enumProp("明确操作", "get", "validate", "update", "export"),
+			"action":      enumProp("明确操作", "get", "validate", "update", "export", "probe_upstreams", "restart_upstream", "reload_upstreams"),
 			"config":      map[string]any{"type": "object"},
 			"destination": map[string]any{"type": "string"},
+			"name":        strProp("上游名（probe_upstreams 可选、restart_upstream 必填）"),
 		}, "action"),
 		func(ctx context.Context, args json.RawMessage) (any, error) {
 			var in struct {
 				Action      string          `json:"action"`
 				Config      json.RawMessage `json:"config"`
 				Destination string          `json:"destination"`
+				Name        string          `json:"name"`
 			}
 			_ = json.Unmarshal(args, &in)
 
@@ -100,17 +102,7 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 				}
 				return ok(map[string]any{"valid": true}), nil
 			case "update":
-				if len(in.Config) == 0 {
-					return errFail("MISSING_CONFIG", "config 参数必填"), nil
-				}
-				tmp := configPath + ".tmp"
-				if err := os.WriteFile(tmp, in.Config, 0600); err != nil {
-					return nil, err
-				}
-				if err := os.Rename(tmp, configPath); err != nil {
-					return nil, err
-				}
-				return okMsg("配置已更新，重启 supervisor 生效"), nil
+				return updateConfig(configPath, in.Config)
 			case "export":
 				if in.Destination == "" {
 					return errFail("MISSING_DEST", "destination 必填"), nil
@@ -124,6 +116,18 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 					return nil, err
 				}
 				return ok(map[string]any{"path": target}), nil
+
+			// ---- 上游 MCP 聚合 ----
+			//
+			// 这三个 action 是 WebUI 的主要入口：WebUI 直接原子改写
+			// config.json 的 upstreams 数组，然后调 reload_upstreams
+			// 让 daemon 立刻生效（不需要重启模块）。
+			case "probe_upstreams":
+				return probeUpstreams(ctx, in.Name, deps)
+			case "reload_upstreams":
+				return reloadUpstreams(ctx, configPath, deps)
+			case "restart_upstream":
+				return restartUpstream(ctx, in.Name, deps)
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
@@ -143,7 +147,7 @@ func registerStatusTools(reg RegisterFn, deps *Deps) {
 			if in.Action == "collect" {
 				target := resolvePath(deps, in.Path)
 				if in.Path == "" {
-					target = filepath.Join(deps.Config.Paths.WorkspaceRoot,
+					target = filepath.Join(deps.Config.WorkspaceRoot(),
 						"diagnostics-"+time.Now().Format("20060102-150405")+".txt")
 				}
 				if err := guardPath(target, false); err != nil {

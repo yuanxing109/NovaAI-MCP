@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -13,17 +14,16 @@ import (
 
 	"github.com/novaai/novaai-mcp/internal/adapter"
 	"github.com/novaai/novaai-mcp/internal/audit"
-	"github.com/novaai/novaai-mcp/internal/auth"
 	"github.com/novaai/novaai-mcp/internal/config"
 	"github.com/novaai/novaai-mcp/internal/health"
 	"github.com/novaai/novaai-mcp/internal/mcp"
-	"github.com/novaai/novaai-mcp/internal/migrate"
 	"github.com/novaai/novaai-mcp/internal/pathguard"
 	"github.com/novaai/novaai-mcp/internal/profile"
 	"github.com/novaai/novaai-mcp/internal/ratelimit"
 	"github.com/novaai/novaai-mcp/internal/session"
 	"github.com/novaai/novaai-mcp/internal/shutdown"
 	"github.com/novaai/novaai-mcp/internal/tools"
+	"github.com/novaai/novaai-mcp/internal/upstream"
 )
 
 var (
@@ -34,7 +34,6 @@ var (
 const (
 	defaultStateDir   = "/data/adb/novaai-mcp"
 	defaultConfigFile = "config.json"
-	defaultTokenFile  = "token"
 	pidFileName       = "novaaimcpd.pid"
 )
 
@@ -87,17 +86,15 @@ func main() {
 	health.InstallCrashHandlers(crashDir, Version, Commit)
 
 	configPath := filepath.Join(*stateDir, defaultConfigFile)
-	tokenPath := filepath.Join(*stateDir, defaultTokenFile)
 
-	cfg, err := loadOrMigrateConfig(*stateDir, configPath, tokenPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		log.Fatalf("配置加载失败: %v", err)
 	}
-	log.Printf("配置加载完成: schema=%d token.enabled=%v lan.enabled=%v",
-		cfg.SchemaVersion, cfg.Security.Token.Enabled, cfg.Security.LAN.Enabled)
+	log.Printf("配置加载完成: listen=%s profile=%s", cfg.Listen, cfg.Profile)
 
 	// pathguard 的受保护前缀跟随实际 stateDir，避免把路径写死在两处。
-	pathguard.SetStateDir(cfg.Paths.StateDir)
+	pathguard.SetStateDir(cfg.StateDir)
 
 	auditLogger, err := audit.NewLogger(cfg)
 	if err != nil {
@@ -105,12 +102,35 @@ func main() {
 	}
 	defer auditLogger.Close()
 
-	profileStore := profile.NewStore(cfg)
-	sessionMgr := session.NewManager(cfg, auditLogger)
+	profileStore := profile.NewStore()
+	sessionMgr := session.NewManager(auditLogger)
 	defer sessionMgr.Stop()
 	defer sessionMgr.CloseAll()
 
 	rateLimiter := ratelimit.NewLimiter(cfg)
+
+	// ---- 上游 MCP 聚合 ----
+	//
+	// 注册表在启动时构造并**同步探测一次**：tools/list 的合并结果依赖
+	// 探测结果，如果异步探测，第一个客户端大概率看到一个还没有上游工具的
+	// 列表，然后要等一次 polling 才会变 —— 而本服务不做后台轮询，
+	// 那个"之后"永远不会到来。
+	//
+	// 探测是并发 + 各自带超时的（见 Registry.ProbeAll），并且整体再加一道
+	// StartupProbeTimeout 的上限 —— 配了不可达的上游时，宁可先起来，
+	// 也不要为了一个探测把启动拖满一个 shellTimeoutSeconds。
+	upstreams := upstream.NewRegistry(cfg)
+	upstreams.SetAudit(auditLogger)
+	if n := upstreams.Count(); n > 0 {
+		log.Printf("探测上游 MCP %d 个", n)
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), upstream.StartupProbeTimeout)
+		upstreams.Init(probeCtx)
+		cancelProbe()
+		for _, st := range upstreams.Status() {
+			log.Printf("  上游 %s: %s（工具 %d）", st.Name, st.Status, st.Tools)
+		}
+	}
+	defer upstreams.Close()
 
 	cmdAdapter, err := adapter.Detect(nil)
 	if err != nil {
@@ -121,19 +141,21 @@ func main() {
 
 	// 组装工具依赖
 	deps := &tools.Deps{
-		Config:   cfg,
-		Audit:    auditLogger,
-		Sessions: sessionMgr,
-		Profiles: profileStore,
-		Adapter:  cmdAdapter,
-		Version:  Version,
-		Commit:   Commit,
-		StateDir: *stateDir,
+		Config:    cfg,
+		Audit:     auditLogger,
+		Sessions:  sessionMgr,
+		Profiles:  profileStore,
+		Adapter:   cmdAdapter,
+		Version:   Version,
+		Commit:    Commit,
+		StateDir:  *stateDir,
+		Upstreams: upstreams,
 	}
 
 	registry := tools.NewRegistry()
 	tools.RegisterAll(registry, deps)
-	log.Printf("已注册工具 %d 个", registry.Count())
+	log.Printf("已注册本地工具 %d 个，合并上游工具 %d 个",
+		registry.Count(), upstreams.ToolCount())
 
 	server := mcp.NewServer(&mcp.ServerConfig{
 		Config:    cfg,
@@ -141,6 +163,7 @@ func main() {
 		Audit:     auditLogger,
 		RateLimit: rateLimiter,
 		Deps:      deps,
+		Upstreams: upstreams,
 	})
 
 	handler := mcp.BuildMiddlewareChain(server, &mcp.MiddlewareConfig{
@@ -149,7 +172,6 @@ func main() {
 		Sessions:  sessionMgr,
 		RateLimit: rateLimiter,
 		Registry:  registry,
-		Profiles:  profileStore,
 	})
 
 	runner := shutdown.NewRunner(cfg, server, sessionMgr)
@@ -190,60 +212,16 @@ func prepareStateDir(dir string) error {
 	return nil
 }
 
-func loadOrMigrateConfig(stateDir, configPath, tokenPath string) (*config.Config, error) {
+// loadConfig 读取配置；不存在时生成默认配置。
+//
+// 配置极简，没有 schema 迁移：字段就那么多，旧配置里的未知键会被
+// JSON 反序列化忽略，缺失的键取默认值。
+func loadConfig(configPath string) (*config.Config, error) {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		log.Printf("未检测到配置，生成默认配置")
 		if err := config.WriteAtomic(configPath, config.Default()); err != nil {
 			return nil, err
 		}
-	} else if err := migrate.RunIfNeeded(stateDir, configPath, tokenPath); err != nil {
-		log.Printf("迁移失败: %v", err)
 	}
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := syncToken(cfg, tokenPath); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-// syncToken 让 token 文件成为唯一事实来源。
-//
-// 历史问题：默认配置里随机生成一个 token，而 token 文件里是另一个随机 token，
-// action.sh 展示的是文件里的那个，客户端照着配必然 401。这里统一以文件为准。
-func syncToken(cfg *config.Config, tokenPath string) error {
-	if cfg.Security.Token.RotateOnStart {
-		tok, err := auth.GenerateToken()
-		if err != nil {
-			return err
-		}
-		cfg.Security.Token.Value = tok
-		if err := auth.WriteToken(tokenPath, tok); err != nil {
-			return err
-		}
-		if err := config.WriteAtomic(filepath.Join(filepath.Dir(tokenPath), defaultConfigFile), cfg); err != nil {
-			return err
-		}
-		log.Printf("已轮换 token（rotateOnStart=true）")
-		return nil
-	}
-
-	tok, err := auth.LoadToken(tokenPath)
-	if err != nil || tok == "" {
-		if cfg.Security.Token.Value == "" {
-			t, genErr := auth.GenerateToken()
-			if genErr != nil {
-				return genErr
-			}
-			cfg.Security.Token.Value = t
-		}
-		return auth.WriteToken(tokenPath, cfg.Security.Token.Value)
-	}
-
-	cfg.Security.Token.Value = tok
-	return auth.EnsurePerms(tokenPath)
+	return config.Load(configPath)
 }

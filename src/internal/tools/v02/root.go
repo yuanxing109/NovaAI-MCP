@@ -6,10 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-
-	"github.com/novaai/novaai-mcp/internal/pathguard"
 )
 
 func registerRootTools(reg RegisterFn, deps *Deps) {
@@ -190,153 +187,6 @@ func registerRootTools(reg RegisterFn, deps *Deps) {
 			}
 			return errFail("UNKNOWN_ACTION", in.Action), nil
 		})
-
-	// ---- backup ----
-	reg("novaai_backup", "备份", "创建、列出、验证、恢复或删除备份",
-		objSchema(map[string]any{
-			"action":           enumProp("操作", "create", "list", "verify", "restore", "remove"),
-			"path":             strProp("备份路径"),
-			"sources":          arrProp("源路径数组"),
-			"destination":      strProp("目标路径"),
-			"sha256":           strProp("期望 SHA-256"),
-			"confirmDangerous": boolProp("确认破坏性"),
-		}, "action"),
-		func(ctx context.Context, args json.RawMessage) (any, error) {
-			var in struct {
-				Action      string   `json:"action"`
-				Path        string   `json:"path"`
-				Sources     []string `json:"sources"`
-				Destination string   `json:"destination"`
-				SHA256      string   `json:"sha256"`
-				Confirm     bool     `json:"confirmDangerous"`
-			}
-			_ = json.Unmarshal(args, &in)
-
-			backupDir := filepath.Join(deps.StateDir, "backups")
-
-			switch in.Action {
-			case "create":
-				_ = os.MkdirAll(backupDir, 0700)
-				name := fmt.Sprintf("backup-%d.tar.gz", time.Now().Unix())
-				tgt := filepath.Join(backupDir, name)
-				if in.Destination != "" {
-					tgt = resolvePath(deps, in.Destination)
-				}
-				if err := guardPath(tgt, false); err != nil {
-					return errFail("PROTECTED_PATH", err.Error()), nil
-				}
-
-				var srcs []string
-				for _, s := range in.Sources {
-					srcs = append(srcs, resolvePath(deps, s))
-				}
-				if len(srcs) == 0 {
-					srcs = []string{deps.StateDir}
-				}
-
-				cmd := fmt.Sprintf("tar -czf %s %s", shQuote(tgt), quoteAll(srcs))
-				_, errOut, code, _ := runSh(ctx, deps, "novaai_backup", cmd, 5*time.Minute)
-				if code != 0 {
-					return errFail("BACKUP_FAILED", errOut), nil
-				}
-
-				sha, _ := computeHash(tgt, "sha256")
-				return ok(map[string]any{"path": tgt, "sha256": sha}), nil
-			case "list":
-				entries, _ := os.ReadDir(backupDir)
-				var items []map[string]any
-				for _, e := range entries {
-					info, _ := e.Info()
-					if info != nil {
-						items = append(items, map[string]any{
-							"name":    e.Name(),
-							"size":    info.Size(),
-							"modTime": info.ModTime().Format(time.RFC3339),
-						})
-					}
-				}
-				return ok(map[string]any{"backups": items}), nil
-			case "verify":
-				p := in.Path
-				if p == "" {
-					return errFail("MISSING_PATH", "path 必填"), nil
-				}
-				p = resolvePath(deps, p)
-				actual, err := computeHash(p, "sha256")
-				if err != nil {
-					return errFail("HASH_FAILED", err.Error()), nil
-				}
-				match := in.SHA256 == "" || equalFold(actual, in.SHA256)
-				return ok(map[string]any{"match": match, "sha256": actual}), nil
-			case "restore":
-				if !in.Confirm {
-					return errFail("NOT_CONFIRMED", "restore 需要 confirmDangerous: true"), nil
-				}
-				p := resolvePath(deps, in.Path)
-				dst := in.Destination
-				if dst == "" {
-					dst = "/"
-				} else {
-					dst = resolvePath(deps, dst)
-				}
-				// dst 默认是 "/"，不能整体拒绝；真正的防线是成员检查：
-				// 归档里只要有条目落到分区或模块目录，就拒绝整次恢复。
-				if err := verifyTarMembers(ctx, deps, p, dst); err != nil {
-					return errFail("UNSAFE_ARCHIVE", err.Error()), nil
-				}
-				cmd := fmt.Sprintf("tar -xzf %s -C %s", shQuote(p), shQuote(dst))
-				_, errOut, code, _ := runSh(ctx, deps, "novaai_backup", cmd, 5*time.Minute)
-				if code != 0 {
-					return errFail("RESTORE_FAILED", errOut), nil
-				}
-				return ok(map[string]any{"restored": p, "to": dst}), nil
-			case "remove":
-				if !in.Confirm {
-					return errFail("NOT_CONFIRMED", "remove 需要 confirmDangerous: true"), nil
-				}
-				p := resolvePath(deps, in.Path)
-				if err := guardPath(p, false); err != nil {
-					return errFail("PROTECTED_PATH", err.Error()), nil
-				}
-				if err := os.Remove(p); err != nil {
-					return errFail("REMOVE_FAILED", err.Error()), nil
-				}
-				return ok(map[string]any{"removed": p}), nil
-			}
-			return errFail("UNKNOWN_ACTION", in.Action), nil
-		})
-}
-
-// verifyTarMembers 在解压前列出归档成员，拒绝会落到受保护位置的条目。
-//
-// 这是 restore 的真正防线：只检查 dst 是不够的（dst 默认就是 "/"），
-// 必须看归档里到底有什么。绝对路径与 ".." 一律拒绝。
-func verifyTarMembers(ctx context.Context, deps *Deps, archive, dst string) error {
-	out, errOut, code, _ := runSh(ctx, deps, "novaai_backup",
-		fmt.Sprintf("tar -tzf %s", shQuote(archive)), 60*time.Second)
-	if code != 0 {
-		return fmt.Errorf("无法读取归档成员: %s", errOut)
-	}
-
-	for _, line := range splitLines(out) {
-		name := strings.TrimSpace(line)
-		if name == "" {
-			continue
-		}
-		if strings.HasPrefix(name, "/") {
-			return fmt.Errorf("归档包含绝对路径成员: %s", name)
-		}
-		for _, part := range strings.Split(name, "/") {
-			if part == ".." {
-				return fmt.Errorf("归档包含路径穿越成员: %s", name)
-			}
-		}
-		target := filepath.Join(dst, name)
-		if d := pathguard.CheckSystemPath(target, false); !d.Allowed {
-			return fmt.Errorf("归档成员落在受保护位置: %s（%s）", target, d.Rule)
-		}
-	}
-	return nil
 }
 
 func frameworkIs(name string) bool {
@@ -358,23 +208,4 @@ func indexByte(s string, b byte) int {
 		}
 	}
 	return -1
-}
-
-func equalFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }

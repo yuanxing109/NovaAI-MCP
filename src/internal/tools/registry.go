@@ -10,6 +10,7 @@ import (
 	"github.com/novaai/novaai-mcp/internal/config"
 	"github.com/novaai/novaai-mcp/internal/profile"
 	"github.com/novaai/novaai-mcp/internal/session"
+	"github.com/novaai/novaai-mcp/internal/upstream"
 )
 
 type Handler func(ctx context.Context, args json.RawMessage) (any, error)
@@ -74,6 +75,9 @@ type Deps struct {
 	Version  string
 	Commit   string
 	StateDir string
+	// Upstreams 是上游 MCP 聚合注册表。可以为 nil（测试里常见），
+	// 消费它的工具必须自己判空。
+	Upstreams *upstream.Registry
 }
 
 // ---- 请求级 context 键 ----
