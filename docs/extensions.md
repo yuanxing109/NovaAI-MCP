@@ -40,10 +40,10 @@
     "serverInfo": {
       "name": "novaai-android-mcp",
       "title": "NovaAI Mobile Control Protocol",
-      "version": "0.05",
+      "version": "0.06",
       "description": "Android Root MCP 服务"
     },
-    "instructions": "NovaAI-MCP：Android Root 全能力服务。..."
+    "instructions": "NovaAI-MCP：Android Root 全能力服务。…（其中含技能目录提示）"
   }
 }
 ```
@@ -52,8 +52,19 @@
 会让部分客户端在校验能力后报错。协议版本按客户端请求协商，支持
 `2025-06-18` / `2025-03-26` / `2024-11-05`，不支持时回退到 `2025-06-18`。
 
-`serverInfo.version` 的唯一来源是 `internal/mcp/server.go` 的 `ServerVersion`
-常量，模块版本号（`module.prop`）另算。
+### 1.1 `serverInfo.version` 与 `instructions`
+
+- **`serverInfo.version` 由构建注入。** `build.sh` / `build.ps1` 从
+  `module.prop` 读出 `version`，用 ldflags 注入 `main.Version`，再由 `main`
+  经 `ServerConfig.Version` 传给协议层。`internal/mcp/server.go` 的
+  `ServerVersion` 常量**只是兜底**（`Version` 为空时使用）。
+  它曾经被当成"唯一来源"、且是硬编码的 —— 于是模块升到 0.06 后握手仍报
+  0.05，而 `novaai_status` 报 0.06。同一个值的两个 owner，已改。
+- **`instructions` 会点出技能目录。** `{stateDir}/skills/`（默认
+  `/data/adb/novaai-mcp/skills/`）下的多步配方（APK 逆向、应用 Hook、
+  网络调试、系统排障、备份恢复）没有工具入口，客户端要用 `novaai_fs_read`
+  读；不在握手时给出路径，它们就等于不存在。内容由 `internal/mcp` 的
+  `instructions_test.go` 锁住，改动必须同步那个测试。
 
 ---
 

@@ -12,11 +12,17 @@ const (
 
 	// ShutdownGraceSec 是优雅关闭等待时间。
 	ShutdownGraceSec = 30
+
+	// DefaultStateDir 是状态目录的兜底路径。
+	//
+	// 它是**唯一的字面量来源**：默认配置、以及任何需要在配置缺席时说出
+	// 这个路径的地方（例如 mcp 的 initialize instructions）都引用它。
+	DefaultStateDir = "/data/adb/novaai-mcp"
 )
 
 // Default 返回全新安装时写入的配置。
 func Default() *Config {
-	stateDir := "/data/adb/novaai-mcp"
+	stateDir := DefaultStateDir
 
 	return &Config{
 		StateDir:   stateDir,

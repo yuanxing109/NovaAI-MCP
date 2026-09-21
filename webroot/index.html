@@ -36,7 +36,7 @@
     </div>
 
     <details id="addBox" class="card">
-      <summary>➕ 添加上游</summary>
+      <summary id="addSummary">➕ 添加上游</summary>
       <form id="addForm" class="form">
         <label>名称 <span class="hint">唯一标识，同时是工具名前缀；不能含 <code>__</code></span>
           <input name="name" required pattern="[A-Za-z0-9_.\-]+" placeholder="other_app_mcp">
@@ -107,7 +107,8 @@
         <label class="check"><input name="exposeWhenStopped" type="checkbox"> exposeWhenStopped（未运行时也暴露工具）</label>
 
         <div class="form-actions">
-          <button class="btn btn-primary" type="submit">保存并重载</button>
+          <button class="btn btn-primary" type="submit" id="btnSubmitUpstream">保存并重载</button>
+          <button class="btn is-hidden" type="button" id="btnCancelEdit">取消编辑</button>
           <button class="btn" type="reset">清空</button>
         </div>
       </form>

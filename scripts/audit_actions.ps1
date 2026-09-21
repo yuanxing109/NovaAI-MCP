@@ -174,6 +174,7 @@ foreach ($m in [regex]::Matches($riskText, '"([a-z0-9_]+)"\s*:\s*\{(?<body>[^}]*
     }
 }
 
+$findings = $totalMissing + $totalPhantom + $totalVestigial + $totalNoCatchAll + $totalUnreadParam
 Write-Host ""
 Write-Host "扫描工具数: $totalTools"
 Write-Host "声明但无 case 的 action 总数: $totalMissing"
@@ -181,7 +182,13 @@ Write-Host "摆设 action 字段总数: $totalVestigial"
 Write-Host "缺兜底分支的工具总数: $totalNoCatchAll"
 Write-Host "摆设参数总数: $totalUnreadParam"
 Write-Host "风险表幽灵 action 总数: $totalPhantom"
-if ($totalMissing -eq 0 -and $totalPhantom -eq 0 -and $totalVestigial -eq 0 -and
-    $totalNoCatchAll -eq 0 -and $totalUnreadParam -eq 0) {
-    Write-Host "结论: 工具契约与实现一致"
+if ($findings -eq 0) {
+    Write-Host "结论: 工具契约与实现一致" -ForegroundColor Green
+} else {
+    Write-Host "结论: 存在 $findings 项不一致" -ForegroundColor Red
 }
+
+# 必须真的失败。本脚本长期只在末尾打印结论、从不 exit，于是"风险表幽灵 action
+# 16 条"在 CI 里一直算通过 —— 而 CI 判据是 $LASTEXITCODE。不失败的闸门等于没有
+# 闸门，这正是本仓库反复记录的那类缺陷。
+exit ([int]($findings -gt 0))

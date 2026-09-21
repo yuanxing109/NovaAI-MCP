@@ -97,6 +97,10 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 > 需要更底层的操作（进程属性、网络诊断、任意包管理…）直接用
 > `novaai_shell` / `novaai_script`，以 root 身份执行任意命令。
 
+> 设备上另有 5 份**多步操作配方**（APK 逆向、应用 Hook、网络调试、系统排障、
+> 备份恢复），随模块安装在 `{stateDir}/skills/`。它们不是工具：AI 客户端在
+> `initialize` 的 `instructions` 里会被告知这个目录，按需用 `novaai_fs_read` 读。
+
 > 上游工具以 `{上游名}__{工具名}` 混在**同一个** `tools/list` 里返回。
 > 前缀对不上的名字仍然是 `-32015 工具不存在`。
 

@@ -23,7 +23,13 @@
     tools: [],
     upstreams: [],
     ksuOk: false,
-    busy: false
+    busy: false,
+    // 正在编辑的上游在 state.upstreams 里的下标；-1 表示"新增"模式。
+    // 表单是同一份，靠这个标记决定提交时是替换还是追加。
+    editingIndex: -1,
+    // 编辑目标的名字。用它而不是下标来重新定位：列表被整体替换后
+    // 下标会变，名字不会（改名算成功保存，不需要继续跟踪）。
+    editingName: ''
   };
 
   // ---------------------------------------------------------------- 小工具
@@ -154,6 +160,7 @@
           '<div class="up-actions">' +
             (canStart ? '<button class="btn btn-primary" data-act="start">启动 / 重启</button>' : '') +
             '<button class="btn" data-act="probe">探测</button>' +
+            '<button class="btn" data-act="edit">编辑</button>' +
             '<button class="btn" data-act="toggle">' + (u.enabled ? '禁用' : '启用') + '</button>' +
             '<button class="btn btn-danger" data-act="remove">删除</button>' +
           '</div>' +
@@ -197,6 +204,9 @@
           state.statusByName = {};
           data.upstreams.forEach(function (s) { state.statusByName[s.name] = s; });
         }
+        // 列表被整体替换（增 / 删 / 改都走这里），编辑游标要重新对齐：
+        // 编辑中的那条被删掉时必须退出编辑模式，否则提交会打空。
+        syncEditCursor();
         renderUpstreams();
         if (successMsg) { toast(successMsg); }
       });
@@ -250,6 +260,11 @@
       });
     }
 
+    if (act === 'edit') {
+      startEdit(idx);
+      return;
+    }
+
     if (act === 'remove') {
       if (!window.confirm('删除上游 ' + u.name + '？\n它的工具会立即从工具列表里消失。')) {
         return;
@@ -261,6 +276,89 @@
         });
       });
     }
+  }
+
+  // ------------------------------------------------------------ 编辑上游
+  //
+  // 表单只有一份：新增与编辑共用，靠 state.editingIndex 决定提交时是追加
+  // 还是替换。"改一条配置要先删再建"是这里最早缺的能力 —— 删了重建会让
+  // 那条上游的连接先断一次、工具列表先消失一次。
+  //
+  // 改名是允许的，但要点明后果：名称同时是工具名前缀，改名后
+  // `{旧名}__{工具}` 会整批变成 `{新名}__{工具}`。
+
+  function findIndexByName(name) {
+    for (var i = 0; i < state.upstreams.length; i++) {
+      if (state.upstreams[i].name === name) { return i; }
+    }
+    return -1;
+  }
+
+  function setFormMode(editing, name) {
+    $('#addSummary').textContent = editing ? ('✏️ 编辑上游：' + name) : '➕ 添加上游';
+    $('#btnSubmitUpstream').textContent = editing ? '保存修改' : '保存并重载';
+    $('#btnCancelEdit').classList.toggle('is-hidden', !editing);
+  }
+
+  function fillForm(u) {
+    var f = $('#addForm');
+    var launch = u.launch || {};
+
+    field(f, 'name').value = u.name || '';
+    field(f, 'type').value = u.type || 'http';
+    field(f, 'url').value = u.url || '';
+    field(f, 'command').value = u.command || '';
+    field(f, 'args').value = (u.args || []).join(' ');
+    field(f, 'riskCeiling').value = u.riskCeiling > 0 ? u.riskCeiling : 3;
+    field(f, 'denyTools').value = (u.denyTools || []).join(', ');
+    field(f, 'enabled').checked = u.enabled !== false;
+    field(f, 'autoLaunch').checked = !!u.autoLaunch;
+    field(f, 'exposeWhenStopped').checked = !!u.exposeWhenStopped;
+
+    field(f, 'launchType').value = launch.type || 'manual';
+    field(f, 'package').value = launch.package || '';
+    field(f, 'action').value = launch.action || '';
+    field(f, 'activity').value = launch.activity || '';
+    field(f, 'launchCommand').value = launch.command || '';
+    field(f, 'launchArgs').value = (launch.args || []).join(' ');
+
+    syncFormVisibility();
+    // 回填的是已有配置，端口提示对它没有意义（那条上游本来就在跑）。
+    $('#portHint').classList.add('is-hidden');
+  }
+
+  function startEdit(idx) {
+    var u = state.upstreams[idx];
+    if (!u) { return; }
+    state.editingIndex = idx;
+    state.editingName = u.name;
+    fillForm(u);
+    setFormMode(true, u.name);
+    var box = $('#addBox');
+    box.open = true;
+    if (box.scrollIntoView) { box.scrollIntoView({ block: 'start' }); }
+  }
+
+  /** 退出编辑模式：清空表单、复位文案、收起区域。保存成功与「取消编辑」都走这里。 */
+  function exitEditMode() {
+    state.editingIndex = -1;
+    state.editingName = '';
+    $('#addForm').reset();
+    setFormMode(false);
+    syncFormVisibility();
+    $('#portHint').classList.add('is-hidden');
+    $('#addBox').open = false;
+  }
+
+  /** 列表被整体替换（增删改都由 persist 写回）后，把编辑游标重新对齐。
+   *
+   * 编辑中的那条被删掉时必须退出编辑模式 —— 否则提交会打到一个不存在的下标上，
+   * 把改动静默丢掉。
+   */
+  function syncEditCursor() {
+    if (state.editingIndex < 0) { return; }
+    var i = findIndexByName(state.editingName);
+    if (i < 0) { exitEditMode(); } else { state.editingIndex = i; }
   }
 
   // ------------------------------------------------------------ 添加上游
@@ -386,6 +484,8 @@
   function submitAdd(ev) {
     ev.preventDefault();
     var u = buildUpstreamFromForm();
+    var editing = state.editingIndex >= 0;
+    var renamed = editing && u.name !== state.editingName;
 
     // 前端只做"能立刻给出人话提示"的校验；真正的闸门是 config.Validate，
     // 它会把这些规则（以及 name 不能含 __ 这类更细的）再查一遍。
@@ -398,22 +498,32 @@
       toast('intent 启动方式需要 action 或 activity');
       return;
     }
-    if (state.upstreams.some(function (x) { return x.name === u.name; })) {
-      toast('名称已存在：' + u.name);
-      return;
-    }
+    // 重名检查要放过"编辑中的那一条"：保留原名是合法的更新。
+    var dup = state.upstreams.some(function (x, i) {
+      return x.name === u.name && !(editing && i === state.editingIndex);
+    });
+    if (dup) { toast('名称已存在：' + u.name); return; }
 
-    var submit = $('#addForm button[type=submit]');
+    var submit = $('#btnSubmitUpstream');
+    var saved = false;
     return withBusy(submit, function () {
       return NovaConfig.backup().then(function (bak) {
-        var next = state.upstreams.concat([u]);
-        return persist(next, '已添加 ' + u.name + (bak ? '（备份 ' + bak + '）' : ''));
-      }).then(function () {
-        $('#addForm').reset();
-        syncFormVisibility();
-        $('#portHint').classList.add('is-hidden');
-        $('#addBox').open = false;
+        var next = state.upstreams.slice();
+        var msg;
+        if (editing) {
+          next[state.editingIndex] = u;
+          msg = '已更新 ' + u.name +
+            (renamed ? '（名称即工具前缀，工具名变为 ' + u.name + '__*）' : '') +
+            (bak ? '（备份 ' + bak + '）' : '');
+        } else {
+          next.push(u);
+          msg = '已添加 ' + u.name + (bak ? '（备份 ' + bak + '）' : '');
+        }
+        return persist(next, msg).then(function () { saved = true; });
       });
+    }).then(function () {
+      // 只在真正保存成功后退出编辑模式：校验被服务端打回时保留用户输入。
+      if (saved) { exitEditMode(); }
     });
   }
 
@@ -587,6 +697,7 @@
     $('#addType').addEventListener('change', syncFormVisibility);
     $('#addLaunchType').addEventListener('change', syncFormVisibility);
     $('#addForm').addEventListener('submit', submitAdd);
+    $('#btnCancelEdit').addEventListener('click', exitEditMode);
     $('#addForm').addEventListener('input', function (ev) {
       if (ev.target.name === 'url') { checkPort(ev.target.value); }
     });

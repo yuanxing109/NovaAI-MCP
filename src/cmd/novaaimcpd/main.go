@@ -164,6 +164,9 @@ func main() {
 		RateLimit: rateLimiter,
 		Deps:      deps,
 		Upstreams: upstreams,
+		// 版本号从构建注入传进来（ldflags -X main.Version）。握手响应里的
+		// serverInfo.version 用它，不再是一个与构建无关的硬编码常量。
+		Version: Version,
 	})
 
 	handler := mcp.BuildMiddlewareChain(server, &mcp.MiddlewareConfig{

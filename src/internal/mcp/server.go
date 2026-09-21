@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -16,7 +17,14 @@ import (
 	"github.com/novaai/novaai-mcp/internal/upstream"
 )
 
-// ServerVersion 是 serverInfo.version 的唯一来源，避免多处硬编码漂移。
+// ServerVersion 是 serverInfo.version 的**兜底值**，只在没有注入构建版本时使用。
+//
+// 真正的来源是构建注入的 main.Version（build.sh / build.ps1 从 module.prop 读，
+// 经 ldflags 注入），由 main 通过 ServerConfig.Version 传进来。
+//
+// 这里曾经是一个被当成"唯一来源"的硬编码常量：模块版本升到 0.06 之后，握手
+// 仍报 0.05 而 novaai_status 报 0.06 —— 同一个值的两个 owner。改动见
+// KNOWN_ISSUES 第 18 节。
 const ServerVersion = "0.05"
 
 // 支持的 MCP 协议版本，按新到旧排列。
@@ -32,6 +40,24 @@ type ServerConfig struct {
 	Deps      *tools.Deps
 	// Upstreams 是上游 MCP 聚合注册表。nil 表示不做聚合（测试里常见）。
 	Upstreams *upstream.Registry
+	// Version 是构建注入的版本号。空串时退回 ServerVersion 常量。
+	Version string
+}
+
+// version 返回对外声明的服务版本：优先用构建注入值。
+func (s *Server) version() string {
+	if s.cfg != nil && s.cfg.Version != "" {
+		return s.cfg.Version
+	}
+	return ServerVersion
+}
+
+// stateDir 返回状态目录，配置缺席时退回 DefaultStateDir 常量。
+func (s *Server) stateDir() string {
+	if s.cfg != nil && s.cfg.Config != nil && s.cfg.Config.StateDir != "" {
+		return s.cfg.Config.StateDir
+	}
+	return config.DefaultStateDir
 }
 
 // Identity 是本次请求的协议层标识，由中间件解析后传入。
@@ -191,10 +217,10 @@ func (s *Server) handleInitialize(req *JSONRPCRequest, sessionID string) *JSONRP
 		"serverInfo": map[string]any{
 			"name":        "novaai-android-mcp",
 			"title":       "NovaAI Mobile Control Protocol",
-			"version":     ServerVersion,
+			"version":     s.version(),
 			"description": "Android Root MCP 服务",
 		},
-		"instructions": buildInstructions(),
+		"instructions": buildInstructions(s.stateDir()),
 	}}
 }
 
@@ -551,8 +577,17 @@ func structured(v any) any {
 	}
 }
 
-func buildInstructions() string {
+// buildInstructions 是 initialize 响应里的服务说明。
+//
+// 必须提到技能目录：skills/*.md 没有工具入口（novaai_skill 已删），客户端
+// 只能通过 novaai_fs_read 读。不在握手时给出路径，那批多步配方就等于不存在
+// —— 它们随模块分发却没有任何人知道。
+func buildInstructions(stateDir string) string {
+	skills := strings.TrimRight(stateDir, "/") + "/skills/"
 	return "NovaAI-MCP：Android Root 全能力服务。" +
 		"所有工具通过 tools/call 调用，参数放在 arguments 对象里。" +
-		"工具的业务失败会以 isError=true 返回，请读取 content[0].text 获取原因。"
+		"工具的业务失败会以 isError=true 返回，请读取 content[0].text 获取原因。" +
+		"设备上另有一组多步操作配方（APK 逆向、应用 Hook、网络调试、系统排障、" +
+		"备份恢复），目录 " + skills + "，用 novaai_fs_read 读；" +
+		"遇到这几类任务时先读对应那一份。"
 }

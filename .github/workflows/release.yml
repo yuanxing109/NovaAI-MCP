@@ -180,7 +180,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $failed = @()
-          foreach ($s in @('audit_actions', 'audit_shell')) {
+          foreach ($s in @('audit_actions', 'audit_shell', 'audit_skills')) {
             Write-Host "`n=== $s ==="
             pwsh -NoProfile -File "scripts/$s.ps1"
             if ($LASTEXITCODE -ne 0) { $failed += $s }
