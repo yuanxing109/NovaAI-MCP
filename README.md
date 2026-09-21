@@ -61,18 +61,9 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 2. 通过 Magisk/KernelSU/APatch 安装
 3. 重启设备
 
-> 下载页上带 `-dev.` 后缀的是预发布（CI 全绿但未经真机验证），
-> 不带后缀的是稳定版。二者都附 `.sha256`。
-
-> 发布包由 CI 自动构建并校验。有**两条通道**：
->
-> - **稳定版**（tag 不带后缀）：`module.prop` 的版本还没有对应 Release 时，
->   流水线自动建 tag 并发布。
-> - **预发布**（tag 形如 `v0.05-dev.9`）：只要该版本已发过稳定版，
->   每次 push 到 `main` 都会自动发一个，用于让**未提版本号的修复**也能下载。
->
-> 想要最新的缺陷修复就用带 `-dev.` 的那个；想要稳定使用就用不带后缀的。
-> 见 [docs/CI.md](docs/CI.md)。
+> 下载页上带 `-dev.` 后缀的是预发布（tag 形如 `v0.06-dev.N`），
+> 不带后缀的是稳定版。二者都附 `.sha256`。发布由 CI 自动构建并校验，
+> 详见 [docs/CI.md](docs/CI.md)。
 
 ## MCP 地址
 
@@ -84,8 +75,8 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 客户端连接 `http://<设备IP>:5322/mcp`（本机用 `127.0.0.1`），
 **不需要任何认证头**。
 
-> **改回本地模式**：把 `listen` 改成 `127.0.0.1:5322` 即可，**无需改代码**。
-> 见 [docs/config.md](docs/config.md) 的 `listen` 一节。
+> **本地模式**：把 `listen` 改成 `127.0.0.1:5322`，服务只有本机与数据线可达。
+> 详见 [docs/config.md](docs/config.md)。
 
 ## 工具列表
 
@@ -103,10 +94,8 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 
 （工具名统一带 `novaai_` 前缀，例如 `novaai_status`。）
 
-> 早期版本有 61 个工具。精简到 29 个核心之后，上游聚合又加回了
-> 1 个观测工具（`novaai_upstream_status`）。被裁掉的能力
-> （逆向、Hook、技能、权限策略、通知、各类系统设置开关、网络、备份…）
-> **一律改由 `novaai_shell` 承担**。
+> 需要更底层的操作（进程属性、网络诊断、任意包管理…）直接用
+> `novaai_shell` / `novaai_script`，以 root 身份执行任意命令。
 
 > 上游工具以 `{上游名}__{工具名}` 混在**同一个** `tools/list` 里返回。
 > 前缀对不上的名字仍然是 `-32015 工具不存在`。
@@ -122,7 +111,7 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 > [docs/errors.md](docs/errors.md) 第 3 节。
 
 > 工具调用会过一次档位判定（工具存在性 → 档位 → 限流 → 执行）。
-> 当前只有 `default` 一个档位，**放行全部工具** —— 见下面的安全模型。
+> 只有 `default` 一个档位，**放行全部工具** —— 见下面的安全模型。
 
 > **通用文件与 shell 载体还会过一道受保护路径判定**（分区、`/data/adb/modules`、
 > 模块自身配置、`/sdcard/Android/{data,obb}` 硬拒绝），详见
@@ -155,9 +144,9 @@ Unix Socket: /data/adb/novaai-mcp/mcp.sock
 
 ### 配置
 
-配置只有一件事要理解：`listen`。完整字段见 [docs/config.md](docs/config.md)，
-共 9 个键（含上游列表）。旧的 `security` / `network` / `profiles` /
-`sessionBinding` / `rateLimit` 等段已全部移除，残留在文件里会被静默忽略。
+共 9 个键（含上游列表）：`stateDir` `listen` `unixSocket` `profile`
+`limits` `audit` `shellTimeoutSeconds` `resultPreviewBytes` `upstreams`。
+完整字段见 [docs/config.md](docs/config.md)；配置文件里的未知键会被静默忽略。
 
 ## 上游 MCP 聚合
 
