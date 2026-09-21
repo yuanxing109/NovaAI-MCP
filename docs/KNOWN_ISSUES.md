@@ -1024,3 +1024,71 @@ CI 用的 `pwsh`（`windows-latest` 自带），与本机一致，所以"本地�
   第 7 项也只做关键字配平。本机跑通六个闸门**不等于模块装得上**。
 - `bin/` 下 41 MB 二进制与 jar 的来源、版本、校验方式均无记录
   （本轮只是恢复，没有追溯它们是怎么进来的）。
+
+---
+
+## 16. 第十一轮：WebUI 真机联调（两个都坐实的误报）
+
+真机（Re:KernelSU / ksud 4.1.0）上 WebUI 报了两条错误，**两条都是假的**，
+服务端从头到尾是好的。定位过程全部在设备与 APK 上取证，见 docs/webui.md。
+
+### 16.1 "读不到 config.json（文件不存在）" —— 文件明明存在
+
+**取证**：`adb shell su -c 'cat /data/adb/novaai-mcp/config.json'` 正常返回，
+daemon 进程活着，`curl POST /mcp` 在设备本机直接成功。
+
+**根因**：`lib/kernelsu.js` 初版按 Promise 风格调 `k.exec(command)`，而真机的
+桥是**三参数回调约定**（`ksu.exec(cmd, '{}', callbackName)`，证据：管理器
+APK 里的 `com.resukisu.zako.IKsuInterface` + 同机已验证可用的
+proxypin-cert-installer 模块）。对三参数 Java 方法少传参数时，WebView 的
+JS 桥**不报错**，缺的参数按 null 传下去 —— 命令根本没执行、回调也没来，
+`Promise.resolve(undefined)` 被规范化成 `{errno:0, stdout:''}`，
+config.js 把"空输出"误读成"文件不存在"。
+
+**教训**：**JS→Java 桥的参数个数不匹配是静默失败。** 调外部桥之前先确认
+它的真实调用约定，并且"零输出"必须与"执行了但为空"区分开报。
+
+### 16.2 "Failed to fetch" —— 三道闸叠出来的结构性失败
+
+`lib/mcp-client.js` 初版用 fetch 直连 `http://127.0.0.1:5322`。页面源是
+`https://appassets.androidplatform.net`（HTTPS），要过三道独立致命的闸：
+混合内容（HTTPS→HTTP）、CORS 预检（daemon 无 Access-Control-* 头）、
+Origin 拒绝（daemon 对带 Origin 头的请求一律 -32001）。浏览器看到的永远是
+`TypeError: Failed to fetch`。
+
+**这是方案自身的矛盾**：第一部分明确"删 CORS、有 Origin 就拒"，第三部分又
+让 WebUI 作为 MCP 客户端直接 fetch —— 这两条不能同时成立。当时没有推演
+"页面从哪个源载入"，是这一轮才暴露的。
+
+**修法**：主传输层改为**桥 + curl**（root shell 执行 `/system/bin/curl`，
+没有浏览器、没有 Origin、没有 CORS）；fetch 只在页面与接口**同源**时启用
+（留给 daemon 将来自己托管 webroot 的情形）；普通浏览器打开则明确报错。
+横幅带出 `（传输层：…；桥：…）` 供排障。
+
+### 16.3 KSU 桥的 shell 不支持多行 heredoc
+
+设备上实测 `cat > f <<'EOF' ... EOF` 报 "unclosed"。配置写入与 curl 转发
+因此全部改成 **printf + 单引号转义**（单引号串里只有 `'` 需要转义），并把
+整段脚本压成单行 —— 桥是否保留换行都不再影响语义。
+
+### 16.4 仓库与设备副本的漂移（过程的教训，也是过程的产物）
+
+排查中发现设备上两份 webroot（已装模块 01:22-01:24、`/sdcard` 副本 01:39）
+都**不是**仓库版本 —— 之前在设备侧已经迭代过：ksu-curl 传输层、printf、
+回调式桥，方向全对，但遗留了三个 bug（`transport()` 恒报 ksu-curl、
+Promise 调用约定未修、错误信息仍把桥问题报成文件问题）。
+
+本轮把设备的方向性修正收编进仓库并补上质量（报错分类、回调超时、
+same-origin 判定、curl 退出码映射），**仓库重新成为唯一事实来源**，
+再推回设备两处部署（MD5 与仓库一致）。今后改 WebUI 只改仓库，
+再往设备推 —— 不要再在设备上直接改副本。
+
+### 16.5 验证方式（绕不开"WebView 里点按钮"，所以分层验证）
+
+- 传输层脚本（桥会执行的那段）由 node 从 `mcp-client.js` 里**原样提取**，
+  推到设备以 root 执行：HTTP 200 / 分隔符 / JSON / `_RC=0` 全部符合解析器
+  预期，再喂回 `parseShellOutput` 解出 30 个工具；
+- 四个 JS 过 `node --check`；
+- 桥约定与混合内容/CORS 的结论分别有 APK 反编译与参照模块背书；
+- **WebView 内的最终点击验证仍需人工**：重开 WebUI 看顶部横幅的
+  `传输层 / 桥` 两个值。设备侧再报错时，横幅本身就会说明走到了哪一步。

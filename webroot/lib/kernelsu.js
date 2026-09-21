@@ -1,87 +1,168 @@
 /*
  * lib/kernelsu.js —— KernelSU API 的唯一封装。
  *
- * 为什么需要这一层（而不是在 app.js 里直接 import 'kernelsu'）：
+ * # 桥的真实调用约定（在本机 Re:KernelSU 上验证，不是猜的）
  *
- * 1. **入口有多种。** KernelSU 的 WebUI 桥在不同版本里叫法不同 ——
- *    新版本把 `window.ksu` 注入页面，同时也提供名为 `kernelsu` 的模块
- *    供 `import` 使用。写死一种会在另一种上直接白屏。
+ *   window.ksu.exec(command, optionsJson, callbackName)
+ *   callback(errno, stdout, stderr)
  *
- * 2. **加载方式受限。** 本 WebUI 会被 WebView 以 file:// 打开，ES module
- *    的静态 import 在 file:// 下可能被 CORS 拦掉。所以全部文件都是经典
- *    脚本（挂全局），对 kernelsu 的 `import()` 是**运行时动态**尝试，
- *    失败也只是退化，不影响页面其余部分。
+ * 两条证据：
+ *   1. 管理器 APK（com.resukisu.resukisu）里有 com.resukisu.zako.IKsuInterface，
+ *      暴露 exec / spawn / toast / fullScreen / moduleInfo / listPackages，
+ *      通过 addJavascriptInterface 注入；
+ *   2. 同一台设备上已验证可用的模块（proxypin-cert-installer）就是这么调的。
  *
- * 3. **必须能自证失败。** 在普通浏览器里打开本页面时，我们要给出
- *    "请在 KernelSU 管理器里打开"这句人话，而不是一串 TypeError。
+ * 历史教训：本文件初版按"Promise 风格"调 `k.exec(command)`。对三参数的
+ * Java 方法少传参数时，WebView 的 JS 桥不会报错，而是把缺的参数当 null 传下去
+ * —— 于是命令根本没执行、回调也没来，`Promise.resolve(undefined)` 被规范化成
+ * {errno:0, stdout:''}，上层把"空输出"误读成"文件不存在"。
+ * **参数个数不匹配在这里是静默失败，必须按回调约定调用。**
+ *
+ * 兼容性策略：先按回调约定调；如果桥其实是 Promise 风格（返回 thenable），
+ * 直接改用返回值；如果同步抛错（Promise 风格的桥校验参数个数），退回
+ * Promise 模式。三条路都收口到同一个 {errno, stdout, stderr}。
  */
 (function (global) {
   'use strict';
 
-  var bridge = null; // { exec, spawn?, toast? } —— 探测成功后缓存
+  var bridge = null;      // 探测成功后的桥对象
+  var bridgeType = null;  // 桥的来源，出错时报给用户
+  var readyPromise = null;
 
   function fromWindowKsu() {
     var k = global.ksu;
-    if (k && typeof k.exec === 'function') { return k; }
-    return null;
+    return (k && typeof k.exec === 'function') ? { k: k, type: 'window.ksu' } : null;
   }
 
   function fromWindowKernelsu() {
     var k = global.kernelsu;
-    if (k && typeof k.exec === 'function') { return k; }
-    return null;
+    return (k && typeof k.exec === 'function') ? { k: k, type: 'window.kernelsu' } : null;
   }
 
   function fromModuleImport() {
-    // 动态 import 是异步的，这里返回 Promise。
-    // 裸标识符 'kernelsu' 由 KernelSU 的 WebView 解析；解析不到会 reject，
-    // 我们在调用侧吞掉这个错误 —— 它只意味着"当前不在 KernelSU 里"。
+    // 裸标识符 'kernelsu' 只有 KernelSU 的 WebView 才解析得到；
+    // 解析不到就 reject —— 那只意味着"当前不在 KernelSU 里"。
     return import('kernelsu').then(function (m) {
-      if (m && typeof m.exec === 'function') { return m; }
-      return null;
+      return (m && typeof m.exec === 'function') ? { k: m, type: 'module:kernelsu' } : null;
     }).catch(function () { return null; });
   }
 
-  /**
-   * 探测可用的桥。返回 Promise<bridge|null>。
-   * 结果会缓存，重复调用不会重复探测。
-   */
+  /** 探测桥。只探测一次，后续调用复用同一个 Promise。 */
   function ready() {
     if (bridge) { return Promise.resolve(bridge); }
+    if (readyPromise) { return readyPromise; }
 
     var direct = fromWindowKsu() || fromWindowKernelsu();
-    if (direct) { bridge = direct; return Promise.resolve(bridge); }
+    if (direct) {
+      bridge = direct.k;
+      bridgeType = direct.type;
+      readyPromise = Promise.resolve(bridge);
+      return readyPromise;
+    }
+    readyPromise = fromModuleImport().then(function (found) {
+      bridge = found ? found.k : null;
+      bridgeType = found ? found.type : null;
+      return bridge;
+    });
+    return readyPromise;
+  }
 
-    return fromModuleImport().then(function (m) {
-      bridge = m;
-      return m;
+  /** 是否已在 KernelSU 里（必须在 ready() 完成后读才有意义）。 */
+  function available() { return !!bridge; }
+
+  /** 桥来自哪里。诊断用。 */
+  function type() { return bridgeType; }
+
+  /** 回调约定。返回 Promise<{errno, stdout, stderr}>。 */
+  function execViaCallback(k, command) {
+    return new Promise(function (resolve, reject) {
+      var cb = '_nova_cb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      var settled = false;
+
+      var timer = setTimeout(function () {
+        if (settled) { return; }
+        settled = true;
+        delete global[cb];
+        var e = new Error('KernelSU 桥没有回调 ' + cb + ' —— 命令没有被执行。' +
+          '桥类型：' + bridgeType);
+        e.__noCallback = true;
+        reject(e);
+      }, 30000);
+
+      global[cb] = function (errno, stdout, stderr) {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        delete global[cb];
+        resolve({
+          errno: typeof errno === 'number' ? errno : 0,
+          stdout: stdout || '',
+          stderr: stderr || ''
+        });
+      };
+
+      try {
+        var rv = k.exec(command, '{}', cb);
+        // 桥如果是 Promise 风格，这里的返回值就是 thenable —— 直接采用，
+        // 不等回调（否则要白等一个超时周期）。
+        if (rv && typeof rv.then === 'function') {
+          if (settled) { return; }
+          settled = true;
+          clearTimeout(timer);
+          delete global[cb];
+          Promise.resolve(rv).then(function (r) {
+            r = r || {};
+            resolve({
+              errno: typeof r.errno === 'number' ? r.errno : (r.code || 0),
+              stdout: r.stdout || '',
+              stderr: r.stderr || ''
+            });
+          }, function (err) {
+            global[cb] = undefined;
+            reject(err);
+          });
+        }
+      } catch (e) {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        delete global[cb];
+        e.__syncThrow = true;
+        reject(e);
+      }
     });
   }
 
-  /** 是否运行在 KernelSU 的 WebUI 里。 */
-  function available() {
-    return !!bridge;
+  /** Promise 风格的兜底（回调方式同步抛错时才走）。 */
+  function execViaPromise(k, command) {
+    return Promise.resolve().then(function () {
+      return k.exec(command);
+    }).then(function (r) {
+      r = r || {};
+      return {
+        errno: typeof r.errno === 'number' ? r.errno : (r.code || 0),
+        stdout: r.stdout || '',
+        stderr: r.stderr || ''
+      };
+    });
   }
 
   /**
-   * 执行一条 shell 命令。返回 { errno, stdout, stderr }。
+   * 执行一条 shell 命令。返回 Promise<{errno, stdout, stderr}>。
    *
    * errno 非 0 不抛异常 —— 调用方通常需要读 stderr 判断"文件不存在"这类
-   * 正常情况。真正的桥缺失才抛，因为那时什么都做不了。
+   * 正常情况。桥彻底缺失才抛，因为那时什么都做不了。
    */
   function exec(command) {
     return ready().then(function (k) {
       if (!k) {
         throw new Error('未检测到 KernelSU 桥：请在 KernelSU 管理器里打开本页面');
       }
-      // 不同版本返回的字段名略有差异，统一成 errno/stdout/stderr。
-      return Promise.resolve(k.exec(command)).then(function (r) {
-        r = r || {};
-        return {
-          errno: typeof r.errno === 'number' ? r.errno : (r.code || 0),
-          stdout: r.stdout || '',
-          stderr: r.stderr || ''
-        };
+      return execViaCallback(k, command).catch(function (e) {
+        // 只有"同步抛错"才值得换一种调用方式重试；回调没来（超时）说明
+        // 桥根本没执行命令，重试只会再等一遍。
+        if (e && e.__noCallback) { throw e; }
+        return execViaPromise(k, command);
       });
     });
   }
@@ -117,6 +198,7 @@
   global.NovaKsu = {
     ready: ready,
     available: available,
+    type: type,
     exec: exec,
     toast: toast,
     listPackages: listPackages,

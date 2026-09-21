@@ -11,6 +11,9 @@
  *     启动直接失败 —— 一次"加个上游"变成"服务起不来"。
  *   - **不产生第二个 owner**：只改 upstreams 一个键，其余字段原样写回。
  *     所以本文件先读全文、改一个键、再整体写回，而不是拼一份新配置。
+ *
+ * 写入用 printf 不用 heredoc：KSU 桥的 shell 对多行 heredoc 会报
+ * "unclosed"（设备上实测）。lib/mcp-client.js 的传输层同理。
  */
 (function (global) {
   'use strict';
@@ -32,47 +35,37 @@
     return { stateDir: STATE_DIR, config: CONFIG_PATH, tmp: TMP_PATH };
   }
 
-  /** 读取并解析 config.json。文件不存在时返回 daemon 默认值的等价物。 */
-  function read() {
-    return global.NovaKsu.exec('cat ' + CONFIG_PATH + ' 2>/dev/null').then(function (r) {
-      if (r.errno !== 0 || !r.stdout.trim()) {
-        throw new Error('读不到 ' + CONFIG_PATH +
-          '（' + (r.stderr.trim() || '文件不存在') + '）。daemon 尚未启动过？');
-      }
-      try {
-        return JSON.parse(r.stdout);
-      } catch (e) {
-        throw new Error('config.json 不是合法 JSON：' + e.message);
-      }
-    });
-  }
-
   /**
-   * 把一份完整的配置原子写回磁盘。
+   * 读取并解析 config.json。
    *
-   * 用单引号 heredoc 而不是 echo：JSON 压缩成一行后不会包含真实换行，
-   * 因此不可能撞上结束标记；而 <<'EOF' 不做任何变量展开与转义处理，
-   * 内容里的 ' " $ \ 都原样落盘。用 echo '...' 拼接则会被 shell 解析。
+   * 失败时必须把三种不同的原因分开 —— 初版把"桥收到了命令但什么都没执行"
+   * 也报成"文件不存在"，让人对着一个明明存在的文件排查了半天：
+   *   1. cat 真的失败了（errno 非 0 且有 stderr）—— 才是"文件不存在"等；
+   *   2. errno 非 0 但没有 stderr —— 只能报退出码；
+   *   3. errno 0 但输出为空 —— 桥没有真正执行命令，是调用约定问题。
    */
-  function writeAll(cfg) {
-    var json = JSON.stringify(cfg);
-    if (json.indexOf('\n') >= 0) {
-      // JSON.stringify 不会产出真实换行；真出现了说明上游有东西在骗我们，
-      // 这时 heredoc 的终止条件就不再可靠，必须拒绝而不是硬写。
-      return Promise.reject(new Error('拒绝写入：序列化结果含换行，无法安全嵌入 heredoc'));
-    }
-    var script =
-      'cat > ' + TMP_PATH + " << 'NOVA_CFG_EOF'\n" +
-      json + '\n' +
-      'NOVA_CFG_EOF\n' +
-      'chmod 0600 ' + TMP_PATH + ' && ' +
-      'mv ' + TMP_PATH + ' ' + CONFIG_PATH + '\n';
-
-    return global.NovaKsu.exec(script).then(function (r) {
-      if (r.errno !== 0) {
-        throw new Error('写 config.json 失败：' + (r.stderr.trim() || ('errno=' + r.errno)));
+  function read() {
+    return global.NovaKsu.exec('cat ' + CONFIG_PATH).then(function (r) {
+      var out = (r.stdout || '').trim();
+      if (out) {
+        try {
+          return JSON.parse(out);
+        } catch (e) {
+          throw new Error('config.json 不是合法 JSON：' + e.message);
+        }
       }
-      return true;
+
+      var errText = (r.stderr || '').trim();
+      if (r.errno !== 0 && errText) {
+        throw new Error('读不到 ' + CONFIG_PATH + '：' + errText);
+      }
+      if (r.errno !== 0) {
+        throw new Error('读不到 ' + CONFIG_PATH + '（cat 退出码 ' + r.errno +
+          '，无错误输出）。daemon 尚未启动过？');
+      }
+      throw new Error('读 ' + CONFIG_PATH + ' 没有任何输出，也没有报错 —— ' +
+        'KernelSU 桥收到了命令但没有执行它（exec 调用约定不匹配？）。' +
+        '请更新 WebUI 或回报这个问题。');
     });
   }
 
@@ -84,11 +77,38 @@
     });
   }
 
+  /**
+   * 把一份完整的配置原子写回磁盘。
+   *
+   * 单引号字符串里只有 ' 需要转义（'\''）；$、反引号、反斜杠都是字面量，
+   * JSON.stringify 的产物原样落盘。序列化结果必须不含真实换行 ——
+   * 那会让"一行 JSON"的前提失效，且脚本无法安全嵌入。
+   */
+  function writeAll(cfg) {
+    var json = JSON.stringify(cfg);
+    if (json.indexOf('\n') >= 0 || json.indexOf('\r') >= 0) {
+      return Promise.reject(new Error('拒绝写入：序列化结果含换行，无法安全嵌入脚本'));
+    }
+    var safeJson = json.replace(/'/g, "'\\''");
+
+    var script =
+      "printf '%s' '" + safeJson + "' > " + TMP_PATH + '; ' +
+      'chmod 0600 ' + TMP_PATH + ' && ' +
+      'mv ' + TMP_PATH + ' ' + CONFIG_PATH;
+
+    return global.NovaKsu.exec(script).then(function (r) {
+      if (r.errno !== 0) {
+        throw new Error('写 config.json 失败：' + ((r.stderr || '').trim() || ('errno=' + r.errno)));
+      }
+      return true;
+    });
+  }
+
   /** 备份当前 config.json（改动前的保险），返回备份路径。 */
   function backup() {
     var stamp = new Date().toISOString().replace(/[:.]/g, '-');
     var dst = CONFIG_PATH + '.webui-' + stamp + '.bak';
-    return global.NovaKsu.exec('cp ' + CONFIG_PATH + ' ' + dst + ' 2>/dev/null').then(function (r) {
+    return global.NovaKsu.exec('cp ' + CONFIG_PATH + ' ' + dst).then(function (r) {
       return r.errno === 0 ? dst : null;
     });
   }

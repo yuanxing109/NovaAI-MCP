@@ -34,9 +34,11 @@ webroot/
 
 ### 不使用 ES module
 
-页面会被 WebView 以 `file://` 打开，静态 `import` 可能被 CORS 拦掉。
-所以全部文件都是经典脚本（挂全局），对 `kernelsu` 的导入是**运行时动态**
-尝试。见 `lib/kernelsu.js` 顶部注释。
+页面的载入源随管理器不同（Re:KernelSU 是
+`https://appassets.androidplatform.net`，有的版本是 `file://`），静态
+`import` 在其中一些环境下会被 CORS 拦掉。所以全部文件都是经典脚本
+（挂全局），对 `kernelsu` 的导入是**运行时动态**尝试。
+见 `lib/kernelsu.js` 顶部注释。
 
 ---
 
@@ -85,43 +87,88 @@ webroot/
 ## 配置写入怎么做的
 
 ```js
-// lib/config.js 的核心
+// lib/config.js 的核心（printf 单行，原子落盘）
+var safeJson = json.replace(/'/g, "'\\''");
 var script =
-  'cat > ' + TMP + " << 'NOVA_CFG_EOF'\n" +
-  JSON.stringify(cfg) + '\n' +
-  'NOVA_CFG_EOF\n' +
-  'chmod 0600 ' + TMP + ' && mv ' + TMP + ' ' + CFG + '\n';
+  "printf '%s' '" + safeJson + "' > " + TMP + '; ' +
+  'chmod 0600 ' + TMP + ' && mv ' + TMP + ' ' + CFG;
 ```
 
 三个刻意的选择：
 
 1. **原子**：先写 `.tmp` 再 `mv`。半截的 `config.json` 会让 daemon 下次启动
    直接失败 —— 一次"加个上游"变成"服务起不来"。
-2. **单引号 heredoc**：`<<'EOF'` 不做任何变量展开与转义处理，内容里的
-   `' " $ \ `` ` 都原样落盘。用 `echo '...'` 拼接则会被 shell 解析。
-   这点实测验证过：`$HOME` 与 `` `id` `` 原样落盘、未被求值。
+2. **单引号 + printf，不用 heredoc**：单引号字符串里只有 `'` 需要转义
+   （`'\''`），`$`、反引号、反斜杠都是字面量，JSON.stringify 的产物原样落盘
+   （`$HOME` 与 `` `id` `` 实测未被求值）。不用 heredoc 是因为 **KSU 桥的
+   shell 对多行 heredoc 会报 "unclosed"**（设备上实测）；顺带让整段脚本
+   变成一行，桥是否保留换行都不再影响结果。`echo '...'` 拼接则会被 shell
+   解析，从一开始就是错的。
 3. **拒绝含真实换行的序列化结果**：`JSON.stringify` 不产出真实换行，
-   真出现了说明有东西在骗我们，此时 heredoc 的终止条件不再可靠，
-   直接拒绝而不是硬写。
+   真出现了说明有东西在骗我们，此时无法安全嵌入脚本，直接拒绝而不是硬写。
 
 改完配置后**必须**调 `novaai_config reload_upstreams` 才会生效 ——
 页面把"写盘 + 重载"绑在 `persist()` 里，三个管理动作都走它。
 
 ---
 
+## 传输层：为什么是"桥 + curl"，而不是 fetch
+
+页面由 KernelSU 管理器以**虚拟源**载入（本机 Re:KernelSU 是
+`https://appassets.androidplatform.net`），与 `http://127.0.0.1:5322` 不同源。
+从 HTTPS 源 fetch HTTP 本机地址要过三道闸，每一道都独立致命：
+
+1. **混合内容**：HTTPS 页面请求 HTTP 资源，WebView 默认禁止；
+2. **CORS 预检**：`Content-Type: application/json` 触发 OPTIONS 预检，
+   daemon 不返回任何 `Access-Control-*` 头 —— 预检必失败；
+3. **Origin 拒绝**：就算前两道都放行，跨源 fetch 必带 Origin 头，而
+   daemon 的 hostMiddleware 对任何带 Origin 头的请求一律返回 `-32001`。
+
+三道合起来：浏览器看到的永远是 `TypeError: Failed to fetch`，而服务
+活得好好的。**这不是配置问题，是这条路径在当前设计下不可能通**
+（"删 CORS、有 Origin 就拒"是刻意的设计，见 [security.md](security.md)）。
+
+所以 `lib/mcp-client.js` 的选择顺序是：
+
+1. **KernelSU 桥可用 → 桥 + curl**（root shell 里执行 `/system/bin/curl`，
+   没有浏览器、没有 Origin、没有 CORS）；
+2. **页面与接口同源 → fetch**（留给将来 daemon 自己托管 webroot 的情形）；
+3. **都不是**（普通浏览器直接打开文件）→ 明确报错，不做注定失败的 fetch。
+
+页面顶部横幅会带出 `（传输层：…；桥：…）`，三个值分别对应上面三条路。
+
+---
+
 ## 探测 KernelSU 桥
 
-`lib/kernelsu.js` 依次尝试三条路，任一成功即缓存：
+### 桥的真实调用约定（在本机验证，不是猜的）
 
-1. `window.ksu`（较新的注入方式）
-2. `window.kernelsu`
-3. 动态 `import('kernelsu')`
+```js
+window.ksu.exec(command, optionsJson, callbackName);
+// callback(errno, stdout, stderr)
+```
 
-全部失败时 `NovaKsu.exec()` 抛出一条人话错误，`app.js` 在顶部显示横幅。
-这是"必须能自证失败"：在普通浏览器里打开本页面，用户应当看到
-"请在 KernelSU 管理器里打开"，而不是一串 `TypeError`。
+两条证据：管理器 APK（`com.resukisu.resukisu`）里的
+`com.resukisu.zako.IKsuInterface` 经 `addJavascriptInterface` 注入，
+暴露 `exec / spawn / toast / fullScreen / moduleInfo / listPackages`；
+同一台设备上已验证可用的模块（proxypin-cert-installer）就是这么调的。
 
-用到的 API：`exec`（读写配置、看进程、`tail` 日志）、`toast`。
+`lib/kernelsu.js` 依次探测 `window.ksu` → `window.kernelsu` →
+动态 `import('kernelsu')`，记录来源（出错时报"桥是什么"）。
+调用时**先按回调约定**；如果桥其实是 Promise 风格（返回 thenable）就改用
+返回值；如果同步抛错才退回 Promise 调用。回调 30 秒没来会明确报
+"桥没有回调 —— 命令没有被执行"，而不是挂死。
+
+> **历史教训**：初版按 Promise 风格调 `k.exec(command)`。对三参数的 Java
+> 方法少传参数时，WebView 的 JS 桥**不报错**，把缺的参数当 null 传下去 ——
+> 命令根本没执行、回调也没来，`Promise.resolve(undefined)` 被规范化成
+> `{errno:0, stdout:''}`，上层把"空输出"误读成"**config.json 文件不存在**"。
+> 设备上 `config.json` 明明存在、daemon 明明活着，排查方向被完全带偏。
+> 参数个数不匹配在这里是**静默失败**。
+
+全部探测失败时 `NovaKsu.exec()` 抛出一条人话错误，`app.js` 在顶部显示横幅。
+
+用到的 API：`exec`（读写配置、curl 转发、看进程、`tail` 日志）、`toast`。
 `spawn` / `listPackages` / `moduleInfo` 已在封装里留好路，当前页面未使用。
 
 ---

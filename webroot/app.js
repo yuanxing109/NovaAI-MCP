@@ -614,6 +614,7 @@
     // 先探桥：不在 KernelSU 里时，除了"看"什么都做不了，要立刻说清楚。
     return NovaKsu.ready().then(function (k) {
       state.ksuOk = !!k;
+      state.bridgeType = NovaKsu.type();
       if (!state.ksuOk) {
         showBanner('未检测到 KernelSU 桥：页面可以浏览，但读写 config.json、探测上游' +
           '等操作都不可用。请在 KernelSU 管理器里打开本模块的 WebUI。');
@@ -633,9 +634,18 @@
       })
       .catch(function (err) {
         setSvc('未连接', 'pill-err');
-        showBanner('无法连接 MCP 服务 ' + NovaMcp.getBase() + '：' +
-          (err && err.message ? err.message : err) +
-          '。检查 daemon 是否在运行、端口是否与 config.json 的 listen 一致。');
+        // 排障三要素一起给：走了哪条传输层、桥是什么、错误原文。
+        // 初版只报"连不上"，而三条传输路径各自有不同的失败原因
+        // （桥调用约定 / 混合内容 / CORS / Origin 拒绝），不报路径就没法定位。
+        var tp = NovaMcp.transport();
+        var hint = (tp === 'ksu-curl')
+          ? '走的是桥 + curl（与 CORS 无关）：确认 daemon 在运行、端口与 config.json 的 listen 一致。'
+          : (tp === 'fetch'
+              ? 'fetch 只在页面与接口同源时可用；请从 KernelSU 管理器打开本 WebUI。'
+              : '当前没有可用的传输层：请在 KernelSU 管理器里打开本 WebUI。');
+        showBanner('无法连接 MCP 服务 ' + NovaMcp.getBase() +
+          '（传输层：' + tp + '；桥：' + (state.bridgeType || '无') + '）：' +
+          (err && err.message ? err.message : err) + '。' + hint);
         return loadConfig().then(renderUpstreams).catch(function () {});
       });
   }
