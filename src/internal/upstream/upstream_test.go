@@ -3,10 +3,12 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -607,4 +609,128 @@ func newStatusServer(t *testing.T, code int) string {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv.URL + "/mcp"
+}
+
+// ------------------------------------------------- 会话与连接生命周期
+//
+// 方案补充（第十一轮之后）：上游连接必须长驻 —— HTTP 复用会话与连接池，
+// stdio 进程常驻；只有上游表现为无状态时才退化为独立 POST。
+// 下面这组测试把"长驻"从注释变成断言。
+
+// 会话必须复用：多次调用只允许 initialize 一次。
+func TestUpstream_SessionReusedAcrossCalls(t *testing.T) {
+	_, url := startFakeHTTP(t)
+	fakeResetHTTPState()
+	r := NewRegistry(testConfig(httpUpstream("fake", url)))
+	defer r.Close()
+
+	r.ProbeAll(context.Background())
+	for i := 0; i < 3; i++ {
+		if _, err := r.Call(context.Background(), "fake", "echo", []byte(`{"n":1}`)); err != nil {
+			t.Fatalf("第 %d 次调用失败: %v", i+1, err)
+		}
+	}
+	if got := fakeInitCount(); got != 1 {
+		t.Fatalf("initialize 次数 = %d，应为 1 —— 会话必须复用，不能每次调用重建", got)
+	}
+}
+
+// 会话过期（404）必须自愈：重置会话 → 重新 initialize → 重试原请求，
+// 对调用方透明；状态也不允许因为一次会话过期就抖成 stopped。
+func TestUpstream_SessionExpiredReinitializes(t *testing.T) {
+	_, url := startFakeHTTP(t)
+	fakeResetHTTPState()
+	r := NewRegistry(testConfig(httpUpstream("fake", url)))
+	defer r.Close()
+
+	r.ProbeAll(context.Background())
+
+	// expire 让假上游轮换会话：它本身成功（旧会话仍有效），
+	// 下一次带旧 Mcp-Session-Id 的请求会拿到 404。
+	if _, err := r.Call(context.Background(), "fake", "expire", nil); err != nil {
+		t.Fatalf("expire 失败: %v", err)
+	}
+	if _, err := r.Call(context.Background(), "fake", "echo", []byte(`{"y":2}`)); err != nil {
+		t.Fatalf("会话过期后的调用应自愈成功: %v", err)
+	}
+	if got := fakeInitCount(); got != 2 {
+		t.Fatalf("initialize 次数 = %d，应为 2（404 后重新握手一次）", got)
+	}
+	if got := fakeNotFoundCount(); got != 1 {
+		t.Fatalf("404 次数 = %d，应为 1", got)
+	}
+	if st := statusOf(t, r, "fake"); st.Status != config.UpstreamRunning {
+		t.Fatalf("状态 = %s，会话自愈不允许把状态抖成 %s", st.Status, st.Status)
+	}
+}
+
+// maxConcurrent 必须真的限住打到上游的并发 —— 它的目的是防把上游打挂。
+func TestUpstream_MaxConcurrentCapsInFlight(t *testing.T) {
+	_, url := startFakeHTTP(t)
+	fakeResetHTTPState()
+	r := NewRegistry(testConfig(httpUpstream("fake", url, func(u *config.UpstreamConfig) {
+		u.MaxConcurrent = 1
+	})))
+	defer r.Close()
+
+	r.ProbeAll(context.Background())
+
+	var wg sync.WaitGroup
+	errs := make([]error, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = r.Call(context.Background(), "fake", "sleep", []byte(`{"ms":150}`))
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("并发调用 %d 失败: %v", i, err)
+		}
+	}
+	if p := fakePeakInflight(); p != 1 {
+		t.Fatalf("上游峰值在途 = %d，应为 1（maxConcurrent=1）", p)
+	}
+}
+
+// stdio 上游的并发调用：写管道串行化（不串包），响应按 id 分发，
+// N 个并发调用全部成功。
+func TestUpstream_StdioConcurrentCalls(t *testing.T) {
+	r := NewRegistry(testConfig(stdioUpstream("tty")))
+	defer r.Close()
+	r.ProbeAll(context.Background())
+
+	var wg sync.WaitGroup
+	errs := make([]error, 5)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = r.Call(context.Background(), "tty", "echo",
+				[]byte(fmt.Sprintf(`{"i":%d}`, i)))
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("stdio 并发调用 %d 失败: %v", i, err)
+		}
+	}
+}
+
+// LastProbe 应在探测后被填充。
+func TestUpstream_StatusExposesLastProbe(t *testing.T) {
+	_, url := startFakeHTTP(t)
+	r := NewRegistry(testConfig(httpUpstream("fake", url)))
+	defer r.Close()
+
+	if st := statusOf(t, r, "fake"); st.LastProbe != "" {
+		t.Fatalf("探测前 LastProbe 应为空，实际 %q", st.LastProbe)
+	}
+	r.ProbeAll(context.Background())
+	if st := statusOf(t, r, "fake"); st.LastProbe == "" {
+		t.Fatal("探测后 LastProbe 应非空")
+	}
 }

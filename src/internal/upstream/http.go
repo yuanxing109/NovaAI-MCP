@@ -16,11 +16,18 @@ import (
 	"time"
 )
 
+// errSessionExpired 表示"上游声明我们的会话已失效"（MCP 约定用 HTTP 404
+// 表达）。它与 errProtocol 的区别在于处理方式：前者应当**重置会话、
+// 重新 initialize、重试一次**；后者是真正的协议错误，重试没有意义。
+var errSessionExpired = errors.New("上游会话已过期")
+
 // httpTransport 通过 HTTP POST 与上游说话。
 //
-// 每次 call 都是一个独立的 POST —— MCP 的 Streamable HTTP 允许这种无状态
-// 用法。会话 id 若上游在 initialize 响应里给了（Mcp-Session-Id 响应头），
-// 后续请求会带上，因为部分上游会用它会话粘性。
+// 连接与会话都是**长驻**的：http.Client 带 Keep-Alive 连接池，
+// initialize 拿到的 Mcp-Session-Id 存在 h.sid 里、后续每次请求都带上，
+// tools/list 的结果缓存在 entry 上 —— 会话生命周期 = 上游生命周期，
+// 不是请求生命周期。唯一的例外是上游从不返回会话头（无状态上游）：
+// 那时 sid 保持为空，每次请求不带该头，自然退化为独立 POST。
 type httpTransport struct {
 	url    string
 	client *http.Client
@@ -81,6 +88,19 @@ func (h *httpTransport) call(ctx context.Context, method string, params any) (js
 		return nil, fmt.Errorf("%w: 编码请求失败: %v", errProtocol, err)
 	}
 	raw, err := h.post(ctx, body)
+	if err != nil && errors.Is(err, errSessionExpired) {
+		// 会话过期：重置 → 重新 initialize（ensureInit 会看到 inited=false）
+		// → 重试一次原请求。仍失败就把错误交给上层 —— 随后的重探会把
+		// 状态标成 stopped，而不是留着一个陈旧的 running。
+		//
+		// 不用担心 initialize 自身递归：重试条件要求"请求时带着会话 id"，
+		// 而重置后的 initialize 不带 id，最多失败一次就返回。
+		h.resetSession()
+		if ierr := h.ensureInit(ctx); ierr != nil {
+			return nil, ierr
+		}
+		raw, err = h.post(ctx, body)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +123,10 @@ func (h *httpTransport) call(ctx context.Context, method string, params any) (js
 }
 
 // post 发一次 POST，处理状态码与连接层错误。
+//
+// 会话过期的判定：请求时**带着**会话 id，却收到 404 —— MCP 约定上游用
+// 404 表达"session 不认识"。此时返回 errSessionExpired 让 call 层走
+// "重新 initialize + 重试一次"，而不是把一次可自愈的失败直接抛给调用方。
 func (h *httpTransport) post(ctx context.Context, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, bytes.NewReader(body))
 	if err != nil {
@@ -138,11 +162,22 @@ func (h *httpTransport) post(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: 读取响应失败: %v", errUnreachable, err)
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	switch {
+	case resp.StatusCode == http.StatusNotFound && sid != "":
+		return nil, fmt.Errorf("%w: HTTP 404: %s", errSessionExpired, summarize(raw))
+	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return nil, fmt.Errorf("%w: HTTP %d: %s",
 			errProtocol, resp.StatusCode, summarize(raw))
 	}
 	return raw, nil
+}
+
+// resetSession 丢弃当前会话状态，让下一次 ensureInit 重新走 initialize。
+func (h *httpTransport) resetSession() {
+	h.mu.Lock()
+	h.sid = ""
+	h.inited = false
+	h.mu.Unlock()
 }
 
 // maxResponseBytes 是单个上游响应的读取上限（8 MiB）。

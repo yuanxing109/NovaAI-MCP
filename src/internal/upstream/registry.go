@@ -96,6 +96,9 @@ type StatusInfo struct {
 	Launch     string `json:"launch"`
 	AutoLaunch bool   `json:"autoLaunch"`
 	Reason     string `json:"reason,omitempty"`
+	// LastProbe 是最近一次探测的时间（RFC3339，未探测过则为空）。
+	// 对应"每上游一条记录"里的 LastProbe / LastError —— 后者就是 Reason。
+	LastProbe string `json:"lastProbe,omitempty"`
 }
 
 type entry struct {
@@ -104,6 +107,40 @@ type entry struct {
 	reason string
 	tools  []Tool
 	tr     transport
+	// sem 是该上游的并发闸（探测与转发合计）。
+	// nil 表示不限（maxConcurrent = -1）。容量来自 EffectiveMaxConcurrent。
+	sem       chan struct{}
+	lastProbe time.Time
+}
+
+// acquire 占用一个上游并发槽。ctx 结束（超时/取消）时放弃排队。
+func (e *entry) acquire(ctx context.Context, name string) error {
+	if e.sem == nil {
+		return nil
+	}
+	select {
+	case e.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("上游 %s 并发已满（上限 %d）：%v", name, cap(e.sem), ctx.Err())
+	}
+}
+
+func (e *entry) release() {
+	if e.sem != nil {
+		<-e.sem
+	}
+}
+
+// syncSemaphore 让 sem 的容量与配置保持一致（Reload 时调用）。
+func (e *entry) syncSemaphore() {
+	want := e.cfg.EffectiveMaxConcurrent()
+	switch {
+	case want < 0:
+		e.sem = nil // -1：不限
+	case e.sem == nil || cap(e.sem) != want:
+		e.sem = make(chan struct{}, want)
+	}
 }
 
 // Registry 是上游注册表：连接管理、状态维护、工具发现、路由转发。
@@ -189,6 +226,7 @@ func (r *Registry) reload(cfg *config.Config, logIt bool) {
 			e.reason = ""
 		}
 		e.cfg = uc
+		e.syncSemaphore()
 		if !uc.Enabled {
 			if e.tr != nil {
 				e.tr.close()
@@ -340,6 +378,14 @@ func (r *Registry) probe(ctx context.Context, name string) bool {
 	existing := e.tr
 	r.mu.Unlock()
 
+	// 探测本身也是对上游的真实负载（initialize + tools/list），
+	// 所以同样要过该上游的并发闸。
+	if err := e.acquire(ctx, name); err != nil {
+		r.log("upstream_probe", name, "skipped", err.Error())
+		return true
+	}
+	defer e.release()
+
 	// 探测本身不持锁：它要发起网络/进程交互，可能耗时整个 timeout。
 	status, reason, tools, tr, err := connect(ctx, cfg, r.timeout, existing)
 
@@ -352,6 +398,7 @@ func (r *Registry) probe(ctx context.Context, name string) bool {
 		e.tr = tr
 		e.status = status
 		e.reason = reason
+		e.lastProbe = time.Now()
 		// tools 是**上一次成功探测**的结果，不是"本次探测结果"。
 		//
 		// 探测失败时保留它是有意的：exposeWhenStopped 的语义是"未运行时
@@ -431,6 +478,7 @@ func (r *Registry) Status() []StatusInfo {
 			Launch:     e.cfg.LaunchType(),
 			AutoLaunch: e.cfg.AutoLaunch,
 			Reason:     e.reason,
+			LastProbe:  lastProbeOf(e.lastProbe),
 		})
 	}
 	return out
@@ -442,6 +490,14 @@ func targetOf(u config.UpstreamConfig) string {
 	}
 	parts := append([]string{u.Command}, u.Args...)
 	return strings.Join(parts, " ")
+}
+
+// lastProbeOf 把最近探测时间格式化成 RFC3339；零值返回空串。
+func lastProbeOf(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 // Has 判断某个上游名是否已注册。

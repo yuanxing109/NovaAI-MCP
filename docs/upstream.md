@@ -30,6 +30,7 @@ NovaAI-MCP 不只是"一个以 root 运行的工具箱"，它同时是一个 **M
       "args": [],
       "enabled": true,
       "riskCeiling": 3,
+      "maxConcurrent": 0,
       "denyTools": [],
       "exposeWhenStopped": false,
       "autoLaunch": false,
@@ -50,6 +51,7 @@ NovaAI-MCP 不只是"一个以 root 运行的工具箱"，它同时是一个 **M
       "args": ["--port", "8888"],
       "enabled": true,
       "riskCeiling": 2,
+      "maxConcurrent": 0,
       "denyTools": ["dangerous_tool"],
       "exposeWhenStopped": false,
       "autoLaunch": true,
@@ -81,6 +83,7 @@ NovaAI-MCP 不只是"一个以 root 运行的工具箱"，它同时是一个 **M
 | `denyTools` | — | `[]` | 拒绝列表，可写**裸名**（`echo`）或**带前缀名**（`a__echo`） |
 | `exposeWhenStopped` | — | `false` | 未运行时是否仍把工具列给客户端 |
 | `autoLaunch` | — | `false` | 调用未运行的上游时是否先按 `launch` 拉起 |
+| `maxConcurrent` | — | `4` | 该上游的**并发调用上限**（探测与转发合计）。`0`/缺省 = 4；`-1` = 不限。它是"防把上游打挂"的旋钮 —— 上游（尤其 stdio 单进程）往往顺序处理请求，网关无限制并发转发只会让上游的队列失控 |
 | `launch` | — | `manual` | 启动方式，见下 |
 
 > **`riskCeiling` 的粒度是有限的**，别高估它。上游工具的风险由
@@ -148,6 +151,65 @@ NovaAI-MCP 不只是"一个以 root 运行的工具箱"，它同时是一个 **M
 2. `novaai_config action=probe_upstreams`（可带 `name` 只探一个）；
 3. 调用某个**非 running** 的上游工具前，实时探测一次（这一次用
    `shellTimeoutSeconds`，因为要给上游真正干活留余量）。
+
+---
+
+## 连接与会话生命周期
+
+核心原则一句话：**上游连接长驻，session 复用，工具列表缓存。** 只有上游
+显式表现为无状态（initialize 时不返回 `Mcp-Session-Id`）时才退化为
+每次直接 POST —— 这是少数，不需要配置开关：它由上游的行为自然决定。
+
+### HTTP 上游
+
+```
+探测成功（启动 / 热重载 / 调用前实时探测）
+  ↓ initialize → 拿上游 Mcp-Session-Id → 存内存（幂等，只做一次）
+  ↓ tools/list → 缓存工具列表
+  ↓
+后续每次转发：复用同一个 http.Client（连接池，Keep-Alive）
+  + 带上游 session ID
+  ↓
+上游返回 404（session 过期/失效）
+  → 重置会话 → 重新 initialize → 重试一次原请求
+  → 重试仍失败才把错误交给调用方（随后的重探会标 stopped）
+```
+
+- 会话 id 在**任何**响应头里出现都会被采纳（有的上游在 tools/list 才发）。
+- 上游从不返回会话头 → 内存里的 session 保持为空 → 每次请求不带
+  `Mcp-Session-Id`，按无状态上游对待。
+- 每个 HTTP 上游一个独立的 `http.Client`：Keep-Alive 连接池、不走代理、
+  不跟随重定向（跟随会让上游侧的 Host 校验形同虚设）、响应限读 8 MiB。
+
+### stdio 上游
+
+```
+探测成功（或 autoLaunch 触发）
+  ↓ spawn 子进程一次，保持 stdin/stdout 管道
+  ↓ initialize → tools/list → 缓存
+  ↓
+后续每次转发：向已有 stdin 写 JSON-RPC（按 id 多路复用收响应）
+  ↓
+进程退出（EOF / 崩溃 / 调用超时被杀）→ 状态标 stopped
+  autoLaunch 则下次调用拉起，否则等手动启动
+```
+
+- **进程生命周期 = 上游生命周期**，不是请求生命周期。每次调用都 spawn
+  一次既慢又会丢上游的内存状态。
+- 写 stdin 在锁内串行（不会串包）；响应按自增 id 分发。
+- 调用超时会**杀整个进程组**：一个卡死的工具不能留下半死的上游 ——
+  让下一次调用重新 spawn，比留个僵进程更可预测。
+- 上游写进 stderr 的最后 20 行会被保留，进程退出时作为失败原因展示。
+
+### 并发上限（`maxConcurrent`）
+
+每个上游一个信号量，**探测与转发合计**计数（探测本身就是
+initialize + tools/list，也是对上游的真实负载）：
+
+- 到达上限时，后续调用排队等待；等到调用超时（`shellTimeoutSeconds`）
+  就报"并发已满"；
+- `reload_upstreams` 改了上限会即时生效；
+- 这个限制的目的不是防滥用（那是全局 limits 的事），是**防把上游打挂**。
 
 ---
 

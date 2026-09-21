@@ -86,6 +86,13 @@ const (
 // DefaultUpstreamRiskCeiling 是上游缺省的风险上限，与全局 default 档位一致。
 const DefaultUpstreamRiskCeiling = 3
 
+// DefaultUpstreamMaxConcurrent 是上游缺省的并发调用上限。
+//
+// 它的存在理由是"防把上游打挂"而不是防滥用：上游（尤其 stdio 单进程）
+// 往往是顺序处理请求的，网关无限制地并发转发只会让上游的队列失控。
+// 4 是保守起步值 —— 一个上游同时被 4 个工具调用打已经是极端用法。
+const DefaultUpstreamMaxConcurrent = 4
+
 // UpstreamConfig 描述一个上游 MCP 服务。
 //
 // 上游由用户在 WebUI 里增删改，持久化在 config.json 的 upstreams 数组里。
@@ -116,6 +123,24 @@ type UpstreamConfig struct {
 	AutoLaunch bool `json:"autoLaunch,omitempty"`
 	// Launch 缺省等同 {type: "manual"}。
 	Launch *LaunchConfig `json:"launch,omitempty"`
+	// MaxConcurrent 是该上游的并发调用上限（探测与转发合计）。
+	//
+	//   0   缺省，按 DefaultUpstreamMaxConcurrent(4) 处理
+	//  -1   不限
+	//  >0   按该值
+	//
+	// 与全局 limits.maxConcurrent 的分工：那个管"本服务总共同时在忙多少"，
+	// 这个管"单个上游被压多少" —— 上游（尤其 stdio 单进程）往往顺序处理
+	// 请求，无限制并发转发等于让上游的队列失控。见 docs/upstream.md。
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
+}
+
+// EffectiveMaxConcurrent 返回实际生效的并发上限。-1 表示不限。
+func (u *UpstreamConfig) EffectiveMaxConcurrent() int {
+	if u.MaxConcurrent == 0 {
+		return DefaultUpstreamMaxConcurrent
+	}
+	return u.MaxConcurrent
 }
 
 // LaunchConfig 描述"怎么把一个未运行的上游拉起来"。

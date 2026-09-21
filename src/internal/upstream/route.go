@@ -129,6 +129,9 @@ func hintAutoLaunch(reason string) string {
 }
 
 // forward 取当前连接并发一次请求。
+//
+// 转发与探测共用该上游的并发闸（maxConcurrent）：探测本身就是
+// initialize + tools/list，也是对上游的真实负载。
 func (r *Registry) forward(ctx context.Context, upstreamName, method string, params any) (json.RawMessage, error) {
 	r.mu.RLock()
 	e := r.entries[upstreamName]
@@ -141,6 +144,11 @@ func (r *Registry) forward(ctx context.Context, upstreamName, method string, par
 	if tr == nil {
 		return nil, fmt.Errorf("upstream %s 没有可用连接", upstreamName)
 	}
+
+	if err := e.acquire(ctx, upstreamName); err != nil {
+		return nil, err
+	}
+	defer e.release()
 
 	callCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()

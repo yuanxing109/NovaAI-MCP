@@ -110,6 +110,9 @@ func TestValidateUpstreams(t *testing.T) {
 
 		{"riskCeiling 过大", http(func(u *UpstreamConfig) { u.RiskCeiling = 4 }), "riskCeiling 必须在"},
 		{"riskCeiling 为负", http(func(u *UpstreamConfig) { u.RiskCeiling = -1 }), "riskCeiling 必须在"},
+		{"maxConcurrent 过小", http(func(u *UpstreamConfig) { u.MaxConcurrent = -2 }), "maxConcurrent 不能小于 -1"},
+		{"maxConcurrent 不限", http(func(u *UpstreamConfig) { u.MaxConcurrent = -1 }), ""},
+		{"maxConcurrent 合法", http(func(u *UpstreamConfig) { u.MaxConcurrent = 2 }), ""},
 		{"denyTools 非法", http(func(u *UpstreamConfig) { u.DenyTools = []string{"ok", "bad name"} }), "非法工具名"},
 
 		{"launch intent 缺 package", http(func(u *UpstreamConfig) {
@@ -196,6 +199,22 @@ func TestLaunchTypeDefaultsToManual(t *testing.T) {
 	u := UpstreamConfig{Launch: &LaunchConfig{Type: LaunchIntent}}
 	if got := u.LaunchType(); got != LaunchIntent {
 		t.Errorf("= %q", got)
+	}
+}
+
+// maxConcurrent 的三档语义：0=缺省（默认 4）、-1=不限、>0=该值。
+func TestEffectiveMaxConcurrent(t *testing.T) {
+	u := UpstreamConfig{}
+	if got := u.EffectiveMaxConcurrent(); got != DefaultUpstreamMaxConcurrent {
+		t.Errorf("缺省 = %d，期望 %d", got, DefaultUpstreamMaxConcurrent)
+	}
+	u.MaxConcurrent = -1
+	if got := u.EffectiveMaxConcurrent(); got != -1 {
+		t.Errorf("-1 = %d，期望 -1（不限）", got)
+	}
+	u.MaxConcurrent = 7
+	if got := u.EffectiveMaxConcurrent(); got != 7 {
+		t.Errorf("显式 7 = %d", got)
 	}
 }
 

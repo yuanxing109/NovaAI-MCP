@@ -1092,3 +1092,40 @@ same-origin 判定、curl 退出码映射），**仓库重新成为唯一事实�
 - 桥约定与混合内容/CORS 的结论分别有 APK 反编译与参照模块背书；
 - **WebView 内的最终点击验证仍需人工**：重开 WebUI 看顶部横幅的
   `传输层 / 桥` 两个值。设备侧再报错时，横幅本身就会说明走到了哪一步。
+
+---
+
+## 17. 第十二轮：上游连接生命周期按补充方案补齐
+
+方案的补充说明明确了"上游连接必须长驻，不能每次调用都重建"。
+逐条核对实现后：长驻连接、会话复用、工具缓存、stdio 进程常驻**本来就是**
+当前实现（`probe.go` 的 connect 复用活连接、`http.go` 的 sid 复用与
+`ensureInit` 幂等、`stdio.go` 的进程常驻、`entry.tools` 缓存），但有两处
+缺口是本轮补的：
+
+1. **HTTP 会话过期没有自愈。** 上游返回 404（MCP 约定的 session 失效）
+   时，旧实现直接把错误抛给调用方 —— 调用失败后重探，因 HTTP 连接
+   恒为"可复用"，`ensureInit` 又被 `inited` 标记跳过，要等**下一次**
+   探测丢弃连接才恢复。现在 `httpTransport.call` 收到 404 且请求时带着
+   会话 id 时：重置会话 → 重新 initialize → **重试一次原请求**，对调用方
+   透明；重试仍失败才交给上层标 `stopped`。
+2. **上游级限流缺失。** 补充方案明确"session 可能限制并发，也需要按上游
+   限流 —— 不是防滥用，是防把上游打挂"。新增 `upstreams[].maxConcurrent`
+   （0=默认 4，-1=不限），每上游一个信号量，**探测与转发合计**计数
+   （探测本身就是 initialize + tools/list，也是真实负载）。
+3. 顺带把 stdio 的 `tools/call` 全程串行化（`ioMu`，写+等同一把锁）：
+   写串行原本只防串包，全程串行才符合"请求排队"的防打挂语义。
+   与 `mu` 分离是为了避开 `markExited`（拿 `mu` 唤醒等待者）的锁环；
+   锁序恒为 `ioMu -> mu`。
+4. `novaai_upstream_status` 新增 `lastProbe`（RFC3339），对应补充方案
+   记录结构里的 `LastProbe`（`LastError` 就是原有的 `reason`）。
+
+**无状态退化不需要配置**：上游 initialize 时不返回 `Mcp-Session-Id`，
+内存里的会话就保持为空，每次请求自然不带该头 —— 由上游行为决定，
+默认按有状态处理。生命周期全文见 `docs/upstream.md`
+「连接与会话生命周期」。
+
+验证：新增 5 个测试（会话复用、404 自愈、maxConcurrent 串行化、
+stdio 并发无串包、lastProbe 暴露）+ config 层 3 个；全套 `go test -count=1`
+10 包全绿；上游聚合端到端 25/25 复跑通过；新 daemon（commit 91be65c）
+已部署到设备并由看门狗拉起，`novaai_status` 在设备上验证正常。

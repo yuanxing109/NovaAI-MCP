@@ -134,6 +134,9 @@ func validateUpstreams(list []UpstreamConfig) error {
 			return fmt.Errorf("%s.riskCeiling 必须在 0..%d 之间（0 表示继承默认）",
 				where, DefaultUpstreamRiskCeiling)
 		}
+		if u.MaxConcurrent < -1 {
+			return fmt.Errorf("%s.maxConcurrent 不能小于 -1（-1 表示不限，0 表示继承默认）", where)
+		}
 		for _, d := range u.DenyTools {
 			if !toolNameRe.MatchString(d) {
 				return fmt.Errorf("%s.denyTools 含非法工具名 %q", where, d)

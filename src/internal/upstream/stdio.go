@@ -24,6 +24,15 @@ type stdioTransport struct {
 	mu     sync.Mutex
 	pend   map[int]chan rpcResponse
 	nextID int
+	// ioMu 把一次 tools/call 的"写 + 等"全程串行化。
+	//
+	// 为什么不靠 mu：mu 只保护 pend 表与写管道的原子性（防串包），
+	// 等待响应在锁外 —— 那允许 N 个请求同时在途。对 MCP stdio 规范这没有
+	// 错（按 id 多路复用），但 stdio 上游多半是**顺序处理** stdin 的单进程，
+	// 无限制地在途只会让上游的队列失控（方案补充：按上游限流，防打挂）。
+	// 与 mu 分离是因为 markExited 要拿 mu 唤醒等待者，若 call 持 mu 等待
+	// 就死锁了。锁序恒为 ioMu -> mu，无反向。
+	ioMu sync.Mutex
 	// exited 在 stdout EOF / 进程退出时关闭，用于让所有等待者立刻失败。
 	exited chan struct{}
 	// exitReason 记录退出的可读原因，只读一次。
@@ -176,6 +185,16 @@ func (t *stdioTransport) notify(_ context.Context, method string, params any) er
 }
 
 func (t *stdioTransport) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if exited, reason := t.Exited(); exited {
+		return nil, fmt.Errorf("%w: %s", errUnreachable, reason)
+	}
+
+	// 一次调用全程持 ioMu：同一 stdio 上游的 tools/call 排队执行。
+	// markExited 只拿 mu，不会与这里形成锁环。
+	t.ioMu.Lock()
+	defer t.ioMu.Unlock()
+
+	// 排队期间进程可能退出了，出队后再查一次。
 	if exited, reason := t.Exited(); exited {
 		return nil, fmt.Errorf("%w: %s", errUnreachable, reason)
 	}

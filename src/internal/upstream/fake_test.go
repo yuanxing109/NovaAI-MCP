@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -49,6 +51,79 @@ type fakeTool struct {
 // fakeToolNames 是假上游对外声称的工具。其中一个刻意与本地工具同名
 // （novaai_status），用来验证命名空间前缀真的隔离了两者。
 func fakeToolNames() []string { return []string{"echo", "novaai_status"} }
+
+// sleep / expire 是**隐藏工具**：不出现在 tools/list，只供测试直接调用。
+//   - sleep {"ms":N}：睡 N 毫秒再回显，同时记录"在途峰值"，用于验证
+//     maxConcurrent 真的在上游侧限住了并发；
+//   - expire：轮换假上游的会话，让下一次带旧 Mcp-Session-Id 的请求拿到
+//     404，用于验证"会话过期 → 重新 initialize → 重试"的自愈路径。
+
+// fakeHTTPState 是 HTTP 假上游的会话与负载观测（stdio 没有头，天然无会话）。
+var fakeHTTPState struct {
+	mu        sync.Mutex
+	sid       string // 当前有效会话；空 = 尚未 initialize（此时不强校验）
+	sidSeq    int64  // 会话序号（initialize 与 expire 都会推进）
+	initCount int    // **真正的** initialize 次数（expire 轮换不算）
+	notFound  int    // 因会话不匹配返回 404 的次数
+}
+
+// inflight / peak 用 atomic：sleep 工具的 handler 在服务器的 goroutine 里跑。
+var fakeInflight, fakePeak int32
+
+// fakeIssueSession 由 initialize 调用：计数 +1 并签发新会话。
+func fakeIssueSession() string {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	fakeHTTPState.initCount++
+	fakeHTTPState.sidSeq++
+	fakeHTTPState.sid = fmt.Sprintf("sess-%d", fakeHTTPState.sidSeq)
+	return fakeHTTPState.sid
+}
+
+// fakeRotateSession 由 expire 工具调用：只轮换会话，**不计** initialize ——
+// 否则"404 后重新握手"的断言会把这个轮换也数进去。
+func fakeRotateSession() {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	fakeHTTPState.sidSeq++
+	fakeHTTPState.sid = fmt.Sprintf("sess-%d", fakeHTTPState.sidSeq)
+}
+
+func fakeCurrentSession() string {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	return fakeHTTPState.sid
+}
+
+func fakeSessionOK(got string) bool {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	return fakeHTTPState.sid == "" || got == fakeHTTPState.sid
+}
+
+func fakeResetHTTPState() {
+	fakeHTTPState.mu.Lock()
+	fakeHTTPState.sid = ""
+	fakeHTTPState.sidSeq = 0
+	fakeHTTPState.initCount = 0
+	fakeHTTPState.notFound = 0
+	fakeHTTPState.mu.Unlock()
+	atomic.StoreInt32(&fakeInflight, 0)
+	atomic.StoreInt32(&fakePeak, 0)
+}
+
+// 三个统计读取器（测试断言用，不输出会话本身）。
+func fakeInitCount() int {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	return fakeHTTPState.initCount
+}
+func fakeNotFoundCount() int {
+	fakeHTTPState.mu.Lock()
+	defer fakeHTTPState.mu.Unlock()
+	return fakeHTTPState.notFound
+}
+func fakePeakInflight() int32 { return atomic.LoadInt32(&fakePeak) }
 
 func fakeTools() []fakeTool {
 	return []fakeTool{
@@ -115,6 +190,31 @@ func fakeCall(req rpcRequest, reply func(any) []byte, fail func(int, string) []b
 		// 有限的阻塞：客户端超时后应该杀掉我们；万一没杀掉，
 		// 30 秒后也会自己退出，不会让测试进程一直挂着。
 		time.Sleep(30 * time.Second)
+	}
+	if p.Name == "expire" {
+		// 轮换会话：本次调用本身成功（带着的还是旧的有效会话），
+		// 下一次带旧 sid 的请求才会拿到 404。
+		fakeRotateSession()
+	}
+	if p.Name == "sleep" {
+		var a struct {
+			Ms int `json:"ms"`
+		}
+		if len(p.Arguments) > 0 {
+			_ = json.Unmarshal(p.Arguments, &a)
+		}
+		if a.Ms <= 0 {
+			a.Ms = 100
+		}
+		cur := atomic.AddInt32(&fakeInflight, 1)
+		for {
+			peak := atomic.LoadInt32(&fakePeak)
+			if cur <= peak || atomic.CompareAndSwapInt32(&fakePeak, peak, cur) {
+				break
+			}
+		}
+		time.Sleep(time.Duration(a.Ms) * time.Millisecond)
+		atomic.AddInt32(&fakeInflight, -1)
 	}
 	if p.Name == "boom" {
 		return fail(-32000, "假上游故意报错")
@@ -209,6 +309,28 @@ func fakeMux() *http.ServeMux {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+
+		// initialize：签发新会话。它自己不受旧会话约束 ——
+		// 它就是用来建立会话的（包括"404 后重新 initialize"那次）。
+		if req.Method == "initialize" {
+			w.Header().Set("Mcp-Session-Id", fakeIssueSession())
+			body := fakeHandle(req)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			return
+		}
+
+		// 其余带 id 的请求必须带有效会话；不匹配按 MCP 约定返回 404。
+		// 通知（id 为 0）与"从未 initialize 过"（sid 为空 = 无状态上游）不校验。
+		if req.ID != 0 && !fakeSessionOK(r.Header.Get("Mcp-Session-Id")) {
+			fakeHTTPState.mu.Lock()
+			fakeHTTPState.notFound++
+			fakeHTTPState.mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"session expired"}}`))
+			return
+		}
+
 		body := fakeHandle(req)
 		if body == nil {
 			// 通知：HTTP 上返回 202 空体（与真实实现一致）
@@ -217,6 +339,23 @@ func fakeMux() *http.ServeMux {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
+	})
+	// 统计与重置端点：给端到端脚本与进程外测试用；进程内测试直接读变量。
+	mux.HandleFunc("/__stats", func(w http.ResponseWriter, _ *http.Request) {
+		fakeHTTPState.mu.Lock()
+		out := map[string]any{
+			"initialized": fakeHTTPState.initCount,
+			"notFound":    fakeHTTPState.notFound,
+			"hasSession":  fakeHTTPState.sid != "",
+			"peak":        atomic.LoadInt32(&fakePeak),
+		}
+		fakeHTTPState.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	mux.HandleFunc("/__reset", func(w http.ResponseWriter, _ *http.Request) {
+		fakeResetHTTPState()
+		_, _ = w.Write([]byte("ok"))
 	})
 	return mux
 }
