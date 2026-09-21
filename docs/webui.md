@@ -139,6 +139,34 @@ var script =
 
 ---
 
+## 与官方 API 的对照
+
+官方指南：<https://kernelsu.org/zh_CN/guide/module-webui.html>；
+官方 JS 库：npm 包 [`kernelsu`](https://www.npmjs.com/package/kernelsu)（当前 3.0.2）。
+
+`lib/kernelsu.js` 是官方包的**双模式超集**：回调约定、参数形态、window
+注册与清理时机都照抄官方 `index.js`（逐字核对过 npm 3.0.2 的发布物），
+在此之上多出三样东西 —— Promise 风格桥的兜底、回调超时守卫（官方没有，
+回调不来就永远挂起）、桥来源诊断。API 面对照：
+
+| 官方 API | `NovaKsu` 封装 | 页面是否使用 |
+|---|---|---|
+| `exec(cmd, {cwd,env})` → `Promise<{errno,stdout,stderr}>` | `exec(cmd, options)` 同形 | ✓ 全部根操作 |
+| `spawn(cmd, args, {cwd,env})` → ChildProcess 流 | `spawn(cmd, args, options)` 同形 | 未使用；日志页实时 follow 的钥匙 |
+| `toast(msg)` | `toast(msg)` | 部分操作反馈 |
+| `listPackages(type)` → `string[]`（同步） | `listPackages(type)` → `Promise<string[]>` | intent 启动表单选应用 |
+| `getPackagesInfo(pkgs)` → `PackagesInfo[]` | `getPackagesInfo(pkgs)` | 未使用；配合 `ksu://icon/{包名}` 可做带图标的应用选择器 |
+| `moduleInfo()` | `moduleInfo()` | 未使用 |
+| `fullScreen(bool)` / `enableEdgeToEdge(bool)` / `exit()` | **刻意未封装** | 纯外观/生命周期，需要时三行代码的事 |
+
+**为什么不直接用官方 npm 包**：本页面要在 `file://` 与虚拟源两种环境下以
+经典脚本运行（零依赖、无打包器），而官方包是 ES module —— 官方指南自己
+也建议配 parcel 之类的打包器。若将来引入打包器，`lib/kernelsu.js` 可整体
+替换为官方包，调用面已对齐。
+
+**照抄官方约定同时修掉官方的一个坑**：官方 `exec` 的回调若不来就永远挂起
+（没有任何超时）；本封装加了 120 秒守卫，超时报"命令没有被执行"并带上桥类型。
+
 ## 探测 KernelSU 桥
 
 ### 桥的真实调用约定（在本机验证，不是猜的）
