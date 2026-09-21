@@ -271,9 +271,7 @@
       }
       return withBusy(btn, function () {
         var next = state.upstreams.filter(function (x) { return x.name !== u.name; });
-        return NovaConfig.backup().then(function (bak) {
-          return persist(next, '已删除 ' + u.name + (bak ? '（备份 ' + bak + '）' : ''));
-        });
+        return persist(next, '已删除 ' + u.name);
       });
     }
   }
@@ -507,20 +505,17 @@
     var submit = $('#btnSubmitUpstream');
     var saved = false;
     return withBusy(submit, function () {
-      return NovaConfig.backup().then(function (bak) {
-        var next = state.upstreams.slice();
-        var msg;
-        if (editing) {
-          next[state.editingIndex] = u;
-          msg = '已更新 ' + u.name +
-            (renamed ? '（名称即工具前缀，工具名变为 ' + u.name + '__*）' : '') +
-            (bak ? '（备份 ' + bak + '）' : '');
-        } else {
-          next.push(u);
-          msg = '已添加 ' + u.name + (bak ? '（备份 ' + bak + '）' : '');
-        }
-        return persist(next, msg).then(function () { saved = true; });
-      });
+      var next = state.upstreams.slice();
+      var msg;
+      if (editing) {
+        next[state.editingIndex] = u;
+        msg = '已更新 ' + u.name +
+          (renamed ? '（名称即工具前缀，工具名变为 ' + u.name + '__*）' : '');
+      } else {
+        next.push(u);
+        msg = '已添加 ' + u.name;
+      }
+      return persist(next, msg).then(function () { saved = true; });
     }).then(function () {
       // 只在真正保存成功后退出编辑模式：校验被服务端打回时保留用户输入。
       if (saved) { exitEditMode(); }

@@ -56,7 +56,7 @@ webroot/
   | 探测 | `novaai_config probe_upstreams`（带 `name`，只探这一个） |
   | 编辑 | 把该条配置回填到下面的表单并切到编辑模式（见下） |
   | 禁用 / 启用 | 改 `enabled` → 写盘 → `reload_upstreams` |
-  | 删除 | 先备份 `config.json`，再改数组 → 写盘 → `reload_upstreams` |
+  | 删除 | 改数组 → 写盘 → `reload_upstreams` |
 - **添加上游**：名称、类型（http / stdio）、URL 或命令+参数、启动方式、
   `riskCeiling`、`denyTools`、`enabled` / `autoLaunch` / `exposeWhenStopped`。
   填 URL 时会用 `ss`/`netstat` 检查端口占用 —— **只是提示，不是拦截**
@@ -111,12 +111,20 @@ var script =
    直接失败 —— 一次"加个上游"变成"服务起不来"。
 2. **单引号 + printf，不用 heredoc**：单引号字符串里只有 `'` 需要转义
    （`'\''`），`$`、反引号、反斜杠都是字面量，JSON.stringify 的产物原样落盘
-   （`$HOME` 与 `` `id` `` 实测未被求值）。不用 heredoc 是因为 **KSU 桥的
+   （用**真实写入脚本**实测：`$HOME`、`` `id` ``、`$(whoami)`、两种引号与
+   反斜杠都原样落盘。验证方式是 `node scripts/verify_config_write.cjs` ——
+   它加载真实的 `lib/config.js`、捕获它产生的脚本、交给 `sh` 执行后比对
+   字节）。不用 heredoc 是因为 **KSU 桥的
    shell 对多行 heredoc 会报 "unclosed"**（设备上实测）；顺带让整段脚本
    变成一行，桥是否保留换行都不再影响结果。`echo '...'` 拼接则会被 shell
    解析，从一开始就是错的。
 3. **拒绝含真实换行的序列化结果**：`JSON.stringify` 不产出真实换行，
    真出现了说明有东西在骗我们，此时无法安全嵌入脚本，直接拒绝而不是硬写。
+
+> **不写 `.bak` 副本。** 早期每次改动前 `cp` 一份
+> `config.json.webui-<时间>.bak`，在 `/data/adb/novaai-mcp/` 下越积越多，
+> 现在去掉了。剩下的保护是第 1 条 —— 写入原子，不会留下半截文件。
+> 要回退就手工改回：配置只有 9 个键，且未知键会被 daemon 静默忽略。
 
 改完配置后**必须**调 `novaai_config reload_upstreams` 才会生效 ——
 页面把"写盘 + 重载"绑在 `persist()` 里，三个管理动作都走它。
@@ -224,3 +232,9 @@ window.ksu.exec(command, optionsJson, callbackName);
   （例如"name 不能含 `__`"两边都有，而 `url` 的协议前缀只在服务端查）。
 - **`exec` 走的是 KernelSU 的 shell**，页面里的路径是 `exec` 的
   `$PATH` 决定的，与 daemon 自己的环境无关。
+- **写入脚本的转义靠手工验证**，不在 CI 里：`node scripts/verify_config_write.cjs`
+  （三个变异测试验过它有牙齿）。CI 的闸门全是 PowerShell 的 `.ps1`，没有 JS 层
+  检查 —— 改动 `lib/config.js` 的写入路径后请手工跑一次。
+- **不做自动备份**。改配置不再产生 `config.json.webui-*.bak`；唯一剩下的保护是
+  原子写（先 `.tmp` 再 `mv`）。`/data/adb/novaai-mcp/` 里若还留着早先版本的
+  `.bak`，是历史文件，不会被清理。

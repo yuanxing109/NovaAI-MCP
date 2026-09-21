@@ -12,6 +12,11 @@
  *   - **不产生第二个 owner**：只改 upstreams 一个键，其余字段原样写回。
  *     所以本文件先读全文、改一个键、再整体写回，而不是拼一份新配置。
  *
+ * 不做自动备份：早期实现每次改动前 cp 一份 config.json.webui-<时间>.bak，
+ * 在 /data/adb/novaai-mcp 下越积越多。现在没有这一层，剩下的保护是
+ * "写入原子"（改坏也不会留下半截文件）。要回退就手工改回 —— 配置只有
+ * 9 个键，且未知键会被 daemon 静默忽略。
+ *
  * 写入用 printf 不用 heredoc：KSU 桥的 shell 对多行 heredoc 会报
  * "unclosed"（设备上实测）。lib/mcp-client.js 的传输层同理。
  */
@@ -104,21 +109,11 @@
     });
   }
 
-  /** 备份当前 config.json（改动前的保险），返回备份路径。 */
-  function backup() {
-    var stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    var dst = CONFIG_PATH + '.webui-' + stamp + '.bak';
-    return global.NovaKsu.exec('cp ' + CONFIG_PATH + ' ' + dst).then(function (r) {
-      return r.errno === 0 ? dst : null;
-    });
-  }
-
   global.NovaConfig = {
     setStateDir: setStateDir,
     paths: paths,
     read: read,
     writeAll: writeAll,
-    setUpstreams: setUpstreams,
-    backup: backup
+    setUpstreams: setUpstreams
   };
 })(window);
