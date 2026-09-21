@@ -11,10 +11,18 @@ import (
 )
 
 // newInfoServer 构造一个只够回答 initialize 的 Server。
-func newInfoServer(t *testing.T, version, stateDir string) *Server {
+//
+// StateDir 一律用 t.TempDir()，**不要**拿真实设备路径（/data/adb/novaai-mcp）
+// 当 StateDir：audit.NewLogger 会立刻 MkdirAll(stateDir/audit)，而 CI
+// （ubuntu-latest、非 root 用户）建不了 /data —— 本文件的早期版本就是这么写的，
+// 结果本地（Windows 上 "/data" 落在 C:\data，能建）全绿、CI 一跑就
+// "构造审计器失败"。默认路径那条规则改用纯函数断言（见
+// TestInstructionsUsesDefaultStateDir），不落盘。
+func newInfoServer(t *testing.T, version string) *Server {
 	t.Helper()
+
 	cfg := config.Default()
-	cfg.StateDir = stateDir
+	cfg.StateDir = t.TempDir()
 	cfg.ShellTimeoutSeconds = 5
 
 	logger, err := audit.NewLogger(cfg)
@@ -25,7 +33,7 @@ func newInfoServer(t *testing.T, version, stateDir string) *Server {
 
 	return &Server{cfg: &ServerConfig{
 		Config: cfg, Registry: tools.NewRegistry(), Audit: logger,
-		Deps:    &tools.Deps{Config: cfg, Audit: logger, StateDir: stateDir},
+		Deps:    &tools.Deps{Config: cfg, Audit: logger, StateDir: cfg.StateDir},
 		Version: version,
 	}}
 }
@@ -57,7 +65,7 @@ func initializeInfo(t *testing.T, s *Server) map[string]any {
 // 这条以前会失败：握手读的是 mcp.ServerVersion 常量（0.05），而
 // novaai_status 读的是构建注入值 —— 模块升到 0.06 后两处报的版本不一样。
 func TestInitializeReportsInjectedVersion(t *testing.T) {
-	s := newInfoServer(t, "9.9.9-test", "/tmp/nova-test")
+	s := newInfoServer(t, "9.9.9-test")
 	info := initializeInfo(t, s)["serverInfo"].(map[string]any)
 	if got := info["version"]; got != "9.9.9-test" {
 		t.Fatalf("serverInfo.version = %v，期望注入的 9.9.9-test", got)
@@ -66,7 +74,7 @@ func TestInitializeReportsInjectedVersion(t *testing.T) {
 
 // 没有注入版本时退回常量，不能变成空字符串。
 func TestInitializeVersionFallsBack(t *testing.T) {
-	s := newInfoServer(t, "", "/tmp/nova-test")
+	s := newInfoServer(t, "")
 	info := initializeInfo(t, s)["serverInfo"].(map[string]any)
 	if got := info["version"]; got != ServerVersion {
 		t.Fatalf("serverInfo.version = %v，期望退回常量 %s", got, ServerVersion)
@@ -76,10 +84,10 @@ func TestInitializeVersionFallsBack(t *testing.T) {
 // instructions 必须给出技能目录：skills/*.md 没有工具入口，握手时不说，
 // 客户端就无从知道它们存在（这正是它们随包分发却没人读的原因）。
 func TestInstructionsPointAtSkillsDir(t *testing.T) {
-	s := newInfoServer(t, "x", "/data/adb/novaai-mcp")
+	s := newInfoServer(t, "x")
 	ins, _ := initializeInfo(t, s)["instructions"].(string)
-	if !strings.Contains(ins, "/data/adb/novaai-mcp/skills/") {
-		t.Fatalf("instructions 未给出技能目录：%q", ins)
+	if !strings.Contains(ins, s.stateDir()+"/skills/") {
+		t.Fatalf("instructions 未给出技能目录 %s/skills/：%q", s.stateDir(), ins)
 	}
 	if !strings.Contains(ins, "novaai_fs_read") {
 		t.Fatalf("instructions 未说明读取方式：%q", ins)
@@ -93,13 +101,16 @@ func TestInstructionsSkillsPathNoDoubleSlash(t *testing.T) {
 	}
 }
 
-// stateDir 为空时用 DefaultStateDir，不能拼出裸 "/skills/"。
+// 配置缺席时退回 DefaultStateDir，不能拼出裸 "/skills/"。
+//
+// 纯函数断言，不构造审计器 —— 否则会真的去创建 /data/adb/novaai-mcp。
 func TestInstructionsUsesDefaultStateDir(t *testing.T) {
 	s := &Server{cfg: &ServerConfig{}}
-	if got := s.stateDir(); got != config.DefaultStateDir {
+	got := s.stateDir()
+	if got != config.DefaultStateDir {
 		t.Fatalf("stateDir() = %q，期望 %q", got, config.DefaultStateDir)
 	}
-	if !strings.Contains(buildInstructions(s.stateDir()), config.DefaultStateDir+"/skills/") {
-		t.Fatal("instructions 未使用默认状态目录")
+	if !strings.Contains(buildInstructions(got), config.DefaultStateDir+"/skills/") {
+		t.Fatalf("instructions 未使用默认状态目录：%q", buildInstructions(got))
 	}
 }
