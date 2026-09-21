@@ -61,7 +61,8 @@ NovaAI-MCP 是一个运行在 Android 设备上的 MCP (Model Context Protocol) 
 2. 通过 Magisk/KernelSU/APatch 安装
 3. 重启设备
 
-> 下载页上带 `-dev.` 后缀的是预发布（tag 形如 `v0.06-dev.N`），
+> 下载页上带 `-dev.` 后缀的是预发布（tag 形如 `v<当前版本>-dev.N`，
+> 版本取 `module.prop` 的 `version`），
 > 不带后缀的是稳定版。二者都附 `.sha256`。发布由 CI 自动构建并校验，
 > 详见 [docs/CI.md](docs/CI.md)。
 

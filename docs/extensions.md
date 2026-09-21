@@ -40,7 +40,7 @@
     "serverInfo": {
       "name": "novaai-android-mcp",
       "title": "NovaAI Mobile Control Protocol",
-      "version": "0.06",
+      "version": "0.07",
       "description": "Android Root MCP 服务"
     },
     "instructions": "NovaAI-MCP：Android Root 全能力服务。…（其中含技能目录提示）"
