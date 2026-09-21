@@ -1,10 +1,9 @@
 # 备份恢复技能
 
-> 本轮工具精简后，`novaai_backup` 已删除。归档能力由 `novaai_archive`
-> 承担，其余通过 `novaai_shell` 调 `tar`。
->
-> **`confirmDangerous` 也已移除**：`/sdcard/Android/{data,obb}` 现在是被
-> 硬拒绝的位置，不提供"确认后放行"。确需访问走 `novaai_shell`。
+归档能力由 `novaai_archive` 承担，其余通过 `novaai_shell` 调 `tar`。
+
+> **`/sdcard/Android/{data,obb}` 是硬拒绝位置**，通用文件与归档工具都写不进去，
+> 也没有"确认后放行"。确需访问走 `novaai_shell`。
 
 ## 本服务自身状态的备份
 
@@ -32,9 +31,11 @@ novaai_archive → action: list, source: ["/data/adb/novaai-mcp/workspace/nova-m
 ### 校验归档
 
 ```
-novaai_archive → action: verify, source: [".../nova-mcp-backup.tar.gz"]
-novaai_fs_hash  → action: sha256, path: ".../nova-mcp-backup.tar.gz"
+novaai_archive → action: test, source: [".../nova-mcp-backup.tar.gz"]
+novaai_fs_hash → action: calculate, path: ".../nova-mcp-backup.tar.gz"
 ```
+
+（`fs_hash` 默认算法就是 `sha256`，要换算法加 `algorithm: "md5" | "sha1"`。）
 
 ## 恢复
 
@@ -87,10 +88,9 @@ novaai_fs_manage → action: copy, source: "/data/local/tmp/restore/data/data/co
 
 ## 注意事项
 
-- **恢复前先验证归档完整性**（`action: verify` + `novaai_fs_hash`）。
+- **恢复前先验证归档完整性**（`action: test` + `novaai_fs_hash`）。
 - **`/sdcard/Android/{data,obb}` 是硬拒绝**，通用文件与归档工具都写不进去，
   也没有确认放行。
 - 系统应用数据恢复后通常需要重启：`novaai_power → action: reboot`。
-- 早期版本里 `novaai_backup restore` 有一条"逐条判定归档成员"的实现，
-  随该工具一起删除；现在这一步要靠上面那条 `tar -tzf` 检查，
-  **是手工的，不是自动的**。
+- 归档成员是否落在硬拒绝前缀**要靠手工检查**（上面那条 `tar -tzf`），
+  服务不做这一步。

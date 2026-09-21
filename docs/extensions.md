@@ -134,7 +134,7 @@
 
 | 旧工具 | 替代方式 |
 |--------|----------|
-| `novaai_skill`（match / get / list / stats） | 直接读设备上的 `skills/*.md`（`novaai_fs_read`） |
+| `novaai_skill`（match / get / list / stats） | 直接读设备上的 `{stateDir}/skills/*.md`（用 `novaai_fs_read`），见 [security.md](security.md) 的可写子树 |
 | `novaai_reverse_*`（apk / dex / smali / strings / binary / install_tools） | `novaai_shell` 调 apktool / jadx / smali |
 | `novaai_hook_frida` `novaai_hook_xposed` | `novaai_shell` |
 | `novaai_schedule` | `novaai_script` 或 `novaai_shell` |

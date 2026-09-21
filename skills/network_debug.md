@@ -1,7 +1,6 @@
 # 网络调试技能
 
-> 本轮工具精简后，`novaai_network` 已删除。下面全部通过 `novaai_shell`
-> 完成 —— Android 自带的 toybox 已提供大部分网络诊断命令。
+通过 `novaai_shell` 完成 —— Android 自带的 toybox 已提供大部分网络诊断命令。
 
 ## 网络诊断
 
@@ -51,7 +50,8 @@ novaai_capabilities → {}     # 先确认 curl / nc / ping 是否存在
 优于手写 curl 的做法是用本服务的专用工具（它会做 SHA-256 校验与重试）：
 
 ```
-novaai_download → url: "https://example.com/f.bin", destination: "/data/local/tmp/f.bin"
+novaai_download → action: start, url: "https://example.com/f.bin",
+                  destination: "/data/local/tmp/f.bin"
 ```
 
 ## 抓包与连接

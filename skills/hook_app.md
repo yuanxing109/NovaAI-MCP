@@ -1,7 +1,6 @@
 # 应用 Hook 技能
 
-> 本轮工具精简后，`novaai_hook_frida` 与 `novaai_hook_xposed` 已删除。
-> 下面全部通过 `novaai_shell` 完成。
+全部通过 `novaai_shell` 完成。
 
 ## Xposed / LSPosed 模块管理
 

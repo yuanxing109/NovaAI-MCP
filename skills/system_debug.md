@@ -1,7 +1,6 @@
 # 系统调试技能
 
-> 本轮工具精简后，`novaai_property` / `novaai_setting` / `novaai_service` /
-> `novaai_device_info` 等已删除。日志与进程有专用工具，其余走 `novaai_shell`。
+日志与进程有专用工具；系统属性、设置项、服务控制走 `novaai_shell`。
 
 ## 日志查看
 
@@ -51,7 +50,7 @@ novaai_process → action: kill, pid: <PID>, signal: "TERM"
 
 ## 系统属性
 
-`novaai_property` 已删除，用 shell 调 `getprop` / `setprop`：
+用 shell 调 `getprop` / `setprop`：
 
 ```
 # 读取单个属性
@@ -66,7 +65,7 @@ novaai_shell → command: "setprop persist.sys.timezone Asia/Shanghai"
 
 ## 系统设置
 
-`novaai_setting` 已删除，用 shell 调 `settings`：
+用 shell 调 `settings`：
 
 ```
 novaai_shell → command: "settings get global http_proxy"
