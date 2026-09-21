@@ -326,6 +326,10 @@ out of range [1:0]`，一个把真正原因藏起来的错误。删除 `route` /
 不需要设备，也不依赖本机 `go` 在 PATH 上（用 `-GoExe` 指定）。
 **本服务不鉴权**，所以三个探针都不带认证头（旧的 `-Token` 参数已删）。
 
+> **从 v0.07 起这些脚本只能在开发机上跑。** `src/` 已不在本仓库（见第 18 节），
+> 而探针要自举编译、审计要扫源码 —— 没有源码就跑不起来。CI 里也不再跑它们：
+> 流水线现在只有打包与发布。第 18 节记录了这次形态变更的取舍。
+
 | 脚本 | 覆盖 |
 |------|------|
 | `scripts/probe_mcp.ps1` | 协议合规：initialize 协商、通知无响应体、tools/list 数量、content 包装、错误码、批量、无鉴权通路、Host/Origin、限流、会话复用、default 档位放行、pathguard（含 Android/data 硬拒绝） |
@@ -470,9 +474,13 @@ daemon 完全不写 PID 文件（全仓 `*.pid` 零命中），停止功能完�
 对应 Release，就自动建 tag 并发布；push tag 要求与 `module.prop` 一致；
 PR 只跑门禁不发布。完整说明见 [CI.md](CI.md)。
 
-五个 job：`verify`（ubuntu）· `build`（ubuntu）· `regression`（windows）·
+三个 job：`package`（ubuntu，调用 `build.sh package` 打包 + 校验）·
 `release`（ubuntu，稳定通道）· `dev`（ubuntu，预发布通道）。
-两个发布 job 的 `needs` 都是 `[build, regression]`，所以审计或探针失败时不会发布。
+两个发布 job 的 `needs` 都是 `[package]`。
+
+> **形态在 v0.07 变了**：原先是五个 job（`verify` / `build` / `regression` /
+> `release` / `dev`），CI 负责编译并跑全部闸门。现在源码不在仓库，`verify` 与
+> `regression` 无从跑起，已移除 —— 理由与代价见第 18 节。
 
 ### 11a. 预发布通道（第六轮新增）
 
@@ -986,6 +994,12 @@ tools/list 结果**。
 > `bin/` 全量交给 git？倾向后者+一个显式 `--purge`，但这是行为变更，
 > 本轮未动。**在此之前，不要把 `clean` 当作安全的日常目标。**
 
+> **已在 v0.07 解决（第 18 节）**：按当时的判断走了"把 `bin/` 全量交给 git"
+> 这条路 —— 现在连 `bin/<abi>/novaaimcpd` 也入库了，`clean` 改成**只删 `dist/`**，
+> 不再碰 `bin/`。同时两个打包脚本都加了必需文件闸门（`require_module_files` /
+> `Test-RequiredFiles`），条件复制改成无条件复制：缺件**必须失败**。
+> 也就是说这一节记录的两个隐患（clean 删入库文件、残包静默产出）都已结构性消除。
+
 ### 15.4 编码环境（回答"`.ps1` 什么时候能用"）
 
 | 解释器 | BOM-less UTF-8 的 `.ps1` | 本仓库能不能用 |
@@ -1129,3 +1143,68 @@ same-origin 判定、curl 退出码映射），**仓库重新成为唯一事实�
 stdio 并发无串包、lastProbe 暴露）+ config 层 3 个；全套 `go test -count=1`
 10 包全绿；上游聚合端到端 25/25 复跑通过；新 daemon（commit 91be65c）
 已部署到设备并由看门狗拉起，`novaai_status` 在设备上验证正常。
+
+## 18. 第十三轮：仓库形态变更（编译产物入库、源码出仓库、CI 只打包发布）
+
+**用户的判断**：GitHub 仓库不必承载二进制与源码，本地编译完把产物推上去即可；
+GitHub 只负责模块的打包与发布。
+
+### 18a. 决定前的量化（这几条改变过结论）
+
+| | 体积 | 变化频率 |
+|---|---|---|
+| daemon 三个 ABI（arm64 / armv7 / x86_64） | **约 25 MB**（8.5 / 8.2 / 8.3） | **每次升版本都变** → git 历史永久 +25 MB/版本 |
+| `bin/` 的 7zz / jar / wrapper | 41 MB | 静态，基本不变 |
+| `src/` | 539 KB | 每次改动 |
+
+我最初估 daemon 只有 6 MB，实测 25 MB —— 这个数字摆出来后才定的方案（用户明确
+接受"每版本 +25 MB 历史"）。另外 `bin/` 那 41 MB 严格说不是编译产物，而是**模块
+要分发到设备的文件**（7z 可执行、反编译 jar、wrapper 脚本），所以它们留在仓库。
+
+### 18b. 最终形态
+
+```
+仓库 = 模块内容（module.prop / *.sh / webroot / skills / docs）
+     + 编译产物（bin/<abi>/novaaimcpd，本地编译后提交）
+     + 随包资产（bin/<abi>/7zz、bin/tools/*.jar、bin/wrappers/*）
+     － src/（只在开发工作区）
+CI   = 打包（build.sh package，缺件即失败）+ 发布（稳定 / 预发布两条通道）
+```
+
+改动：
+
+- `.gitignore`：删掉 `/bin/*/novaaimcpd`（改为入库）；新增 `/src/`。
+  `git rm -r --cached src` 移出索引，磁盘文件保留。
+- `build.sh`：新增 `package` 模式（只打包，不编译）与 `check` 模式（只验必需
+  文件）；新增 `require_module_files`；**条件复制改为无条件复制**（缺件在
+  `require_module_files` 就失败了）；`clean` 改为只删 `dist/`。
+  `check_go_tool` 在 `src/` 缺失时给出明确提示（源码不在本仓库）。
+- `build.ps1`：同上一一对应（`Test-RequiredFiles`、`package` / `check` 目标、
+  无条件复制、`clean` 只删 `dist/`、`Build-Go` 的源码缺失提示）。
+- `release.yml`：`verify` 与 `regression` 两个 job **删除**；`build` 改名
+  `package` 并改为调用 `bash build.sh package`（不再装 Go）；删掉 job 级那个
+  无人引用的 `zip` output（死声明）；`release` / `dev` 的 `needs` 改为 `[package]`。
+
+### 18c. 代价（必须一起记住，否则会误判）
+
+1. **CI 只剩一道闸门**（打包）。所以缺件一律硬失败 —— 残包（缺 7z / 缺 wrapper
+   / 缺某个 ABI 的 daemon）在 CI 里没有第二个地方能发现。这正是 15.3 节记的那类
+   静默降级，本轮结构性消除。
+2. **CI 无法发现"仓库里的二进制与源码不同步"。** 改了源码却忘了本地重编并提交，
+   打出来的包还是旧 daemon，流水线依旧全绿。只能靠流程：改源码后跑一次 `all`，
+   把重新编译的二进制一起 commit。这条写进了 `docs/CI.md` 的边界一节。
+3. **6 个审计 / 探针脚本只能在开发机上跑**（它们要扫源码或自举编译）。
+   各脚本的通过数仍以第 9 节为准，但那里现在标明了"本机实测"。
+4. 每次升版本 git 历史 +25 MB。这是这个形态的固有成本，不是缺陷。
+
+### 18d. 验证（本轮）
+
+- `bash build.sh check` 基线通过；四个变异（藏 wrapper / 藏 7zz / 藏 x86_64
+  daemon / 藏 update-binary）**全部失败且指名报出文件**，还原后恢复通过。
+- `build.ps1 check` 基线通过；`build.ps1 package` 产出完整包（47 文件 / 61 条目 /
+  19 可执行）并通过 `verify_package.ps1`；藏 `wrappers\sqlite3` 时指名失败。
+- `release.yml` 用 yaml 真解析校验：3 个 job、`needs` 引用完整、`package` 的
+  output 全被下游引用、可执行字段里没有任何编译/测试痕迹、打包入口是
+  `build.sh package`。
+- `audit_actions` / `audit_shell` / `audit_skills` 三个脚本在改动后仍全绿
+  （`audit_shell` 第 3/8 项正是管打包 owner 与 chmod 矩阵的）。

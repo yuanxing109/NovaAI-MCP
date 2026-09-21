@@ -22,14 +22,20 @@ staging 清单在两处各有一份。改动其中一处必须同步另一处，
 
 用法
 ----
-  pwsh -File build.ps1            # 全量：编译 + 打包
+  pwsh -File build.ps1            # 全量：编译 + 打包（先跑必需文件检查）
   pwsh -File build.ps1 go         # 只编译三架构二进制
-  pwsh -File build.ps1 zip        # 只打包（需 bin/ 已就绪）
-  pwsh -File build.ps1 clean      # 清理 bin/ 与 dist/
+  pwsh -File build.ps1 package    # 只打包（需 bin/ 已就绪）；CI 走 build.sh package
+  pwsh -File build.ps1 check      # 只检查模块必需文件是否在位
+  pwsh -File build.ps1 clean      # 清理 dist/
+
+从 v0.07 起 bin/ 是**版本化内容**：三个 ABI 的 novaaimcpd 由本地编译后提交进
+仓库（CI 不再编译），7zz / jar / wrapper 也随仓库提供。所以：
+  · clean **不再**删 bin/ —— 删它会连带删掉工作区里被 git 跟踪的文件。
+  · 编译出来的二进制是"要提交的产物"，重编后请一起 commit（本地编译 → 推送产物）。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'go', 'zip', 'clean')]
+    [ValidateSet('all', 'go', 'package', 'zip', 'check', 'clean')]
     [string]$Target = 'all'
 )
 
@@ -62,6 +68,57 @@ $ArchTargets = @(
 )
 
 function Write-Log([string]$Message) { Write-Host "[build] $Message" }
+
+# 打包前把"模块包里必须有"的东西逐一点名检查（与 build.sh 的 require_module_files
+# 同一份清单，改一处必须同步另一处）。
+#
+# 为什么是硬失败而不是条件复制：这些文件里有 7z、反编译 jar、wrapper、三个 ABI
+# 的 daemon。旧实现对它们是 Test-Path 后条件复制，缺件时打包照样成功、产物校验
+# 照样通过（校验器只看存在的条目），于是没有 7z / 没有 wrapper 的残包会被发出去。
+function Test-RequiredFiles {
+    Write-Log '检查模块必需文件'
+    $missing = New-Object System.Collections.Generic.List[string]
+
+    $rootFiles = @('module.prop', 'customize.sh', 'service.sh', 'post-fs-data.sh',
+                   'uninstall.sh', 'action.sh', 'common.sh', 'sepolicy.rule',
+                   'README.md', 'LICENSE',
+                   'META-INF\com\google\android\update-binary',
+                   'webroot\index.html')
+    foreach ($f in $rootFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $f))) { $missing.Add($f) }
+    }
+    foreach ($d in @('docs', 'skills', 'webroot')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $d))) { $missing.Add("$d\") }
+    }
+
+    # 三个 ABI 的 daemon 与 7zz
+    foreach ($t in $ArchTargets) {
+        foreach ($n in @('novaaimcpd', '7zz')) {
+            $p = Join-Path $BinDir "$($t.Dir)\$n"
+            if (-not (Test-Path -LiteralPath $p)) { $missing.Add("bin\$($t.Dir)\$n") }
+        }
+    }
+    # 随包分发的反编译 jar（wrapper 指向它们）
+    foreach ($j in @('apktool.jar', 'smali.jar', 'baksmali.jar')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $BinDir "tools\$j"))) { $missing.Add("bin\tools\$j") }
+    }
+    # 安装到 PATH 的 wrapper
+    foreach ($w in @('apktool', 'baksmali', 'dexdump', 'jadx', 'smali', 'sqlite3')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $BinDir "wrappers\$w"))) { $missing.Add("bin\wrappers\$w") }
+    }
+
+    if ($missing.Count -gt 0) {
+        Write-Host ''
+        Write-Host '模块包缺件，已中止：' -ForegroundColor Red
+        foreach ($m in $missing) { Write-Host "  · $m" }
+        Write-Host ''
+        Write-Host '补齐方式：'
+        Write-Host '  · daemon      -> 在 src\ 下编译三个 ABI（build.ps1 all 的编译段）'
+        Write-Host '  · 7zz/jar/wrapper -> 这些是随包分发的资产，应随仓库一起提供'
+        Write-Host '不要用"少打几个文件"绕过：残包装到设备上是静默的功能缺失。'
+        throw "模块包缺 $($missing.Count) 个必需文件"
+    }
+}
 
 function Resolve-GoBinary {
     $cmd = Get-Command go -CommandType Application -ErrorAction SilentlyContinue
@@ -125,6 +182,11 @@ function Set-ZipHostToUnix([string]$Path) {
 }
 
 function Build-Go {
+    # 源码不在本仓库（只在含源码的开发工作区里）。缺了就说清楚，
+    # 别让 go build 丢一个"目录不存在"的模糊错误出来。
+    if (-not (Test-Path -LiteralPath $SrcDir)) {
+        throw "缺少 $SrcDir —— 源码不在本仓库，本仓库只负责打包与发布。要编译 daemon，请在含源码的开发工作区里跑 all；本仓库用 package。"
+    }
     $go = Resolve-GoBinary
     Write-Log "使用 go: $go"
 
@@ -171,10 +233,8 @@ function Build-Go {
 function Build-ModuleZip {
     Write-Log "打包模块 ZIP"
 
-    foreach ($t in $ArchTargets) {
-        $bin = Join-Path $BinDir "$($t.Dir)\novaaimcpd"
-        if (-not (Test-Path -LiteralPath $bin)) { throw "缺少 $($t.Dir) 二进制：$bin" }
-    }
+    # 缺件必须在这里就失败，不能等到"条件复制"把包打成残的。
+    Test-RequiredFiles
 
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("novaai-stage-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -188,35 +248,26 @@ function Build-ModuleZip {
         }
 
         # 随模块附带文档，便于在设备上离线查阅
-        $docsSrc = Join-Path $Root 'docs'
-        if (Test-Path -LiteralPath $docsSrc) {
-            $docsDst = Join-Path $stage 'docs'
-            New-Item -ItemType Directory -Force -Path $docsDst | Out-Null
-            Copy-Item -Path (Join-Path $docsSrc '*') -Destination $docsDst -Recurse
-        }
+        $docsDst = Join-Path $stage 'docs'
+        New-Item -ItemType Directory -Force -Path $docsDst | Out-Null
+        Copy-Item -Path (Join-Path $Root 'docs\*') -Destination $docsDst -Recurse
 
-        # 二进制与随附工具（customize.sh 安装时依赖这些内容）
+        # 二进制与随附工具（customize.sh 安装时依赖这些内容）。
+        # 这些是**无条件**复制：Test-RequiredFiles 已经在位性检查过了。
         foreach ($t in $ArchTargets) {
             $dst = Join-Path $stage "bin\$($t.Dir)"
             New-Item -ItemType Directory -Force -Path $dst | Out-Null
             Copy-Item -LiteralPath (Join-Path $BinDir "$($t.Dir)\novaaimcpd") -Destination $dst
-            $sevenZip = Join-Path $BinDir "$($t.Dir)\7zz"
-            if (Test-Path -LiteralPath $sevenZip) { Copy-Item -LiteralPath $sevenZip -Destination $dst }
+            Copy-Item -LiteralPath (Join-Path $BinDir "$($t.Dir)\7zz") -Destination $dst
         }
         foreach ($sub in @('tools', 'wrappers')) {
-            $src = Join-Path $BinDir $sub
-            if (Test-Path -LiteralPath $src) {
-                $dst = Join-Path $stage "bin\$sub"
-                New-Item -ItemType Directory -Force -Path $dst | Out-Null
-                Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse
-            }
+            $dst = Join-Path $stage "bin\$sub"
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Path (Join-Path $BinDir "$sub\*") -Destination $dst -Recurse
         }
-        $skillsSrc = Join-Path $Root 'skills'
-        if (Test-Path -LiteralPath $skillsSrc) {
-            $skillsDst = Join-Path $stage 'skills'
-            New-Item -ItemType Directory -Force -Path $skillsDst | Out-Null
-            Copy-Item -Path (Join-Path $skillsSrc '*.md') -Destination $skillsDst
-        }
+        $skillsDst = Join-Path $stage 'skills'
+        New-Item -ItemType Directory -Force -Path $skillsDst | Out-Null
+        Copy-Item -Path (Join-Path $Root 'skills\*.md') -Destination $skillsDst
 
         # WebUI：KernelSU 只认模块根目录的 webroot/，且必须存在 index.html，
         # 否则模块页面入口不出现。权限与 SELinux context 由 KernelSU 自动设置，
@@ -303,15 +354,18 @@ function Test-Package {
 }
 
 switch ($Target) {
-    'all'   { Build-Go; Build-ModuleZip; Test-Package }
-    'go'    { Build-Go }
-    'zip'   { Build-ModuleZip; Test-Package }
+    'all'     { Build-Go; Build-ModuleZip; Test-Package }
+    'go'      { Build-Go }
+    'package' { Build-ModuleZip; Test-Package }
+    'zip'     { Build-ModuleZip; Test-Package }
+    'check'   { Test-RequiredFiles }
     'clean' {
-        Write-Log "清理构建产物"
-        foreach ($d in @($BinDir, $DistDir)) {
-            if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
-        }
-        Write-Log "完成"
+        # 只删 dist/（本地产物，不入库）。**不要**删 bin/ —— 从 v0.07 起那里是
+        # 版本化内容（三个 ABI 的编译产物 + 随包分发的 7zz/jar/wrapper），
+        # 删掉它等于删掉工作区里被 git 跟踪的文件。
+        Write-Log '清理构建产物（只删 dist/）'
+        if (Test-Path -LiteralPath $DistDir) { Remove-Item -LiteralPath $DistDir -Recurse -Force }
+        Write-Log '完成'
     }
 }
 Write-Log "全部完成"

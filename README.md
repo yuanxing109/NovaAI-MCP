@@ -162,15 +162,19 @@ novaai_app_list → action: list
 
 ## 开发
 
+本仓库只负责模块的**打包与发布**：三个 ABI 的编译产物与随包资产都在仓库里，
+Go 源码（`src/`）不在本仓库。
+
 ```bash
-bash build.sh all          # Unix / macOS / CI
+bash build.sh package          # Unix / macOS / CI：只打包
 ```
 
 ```powershell
-pwsh -File build.ps1 all   # Windows
+pwsh -File build.ps1 package   # Windows：只打包
 ```
 
-构建产物在 `dist/`。CI 与发布流水线见 [docs/CI.md](docs/CI.md)。
+在含源码的开发工作区里还可以用 `all`（先编译三个 ABI，再打包）。产物在 `dist/`。
+打包与发布流水线见 [docs/CI.md](docs/CI.md)。
 
 ## 许可证
 
